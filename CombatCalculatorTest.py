@@ -140,3 +140,8 @@ if __name__ == "__main__":
             results.append(result)
 
     print("\n========== All Calculations Done ==========")
+
+
+out_df = pd.DataFrame(results)
+print("\n=== Summary ===")
+print(out_df.to_string(index=False))
