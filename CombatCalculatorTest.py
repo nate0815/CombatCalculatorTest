@@ -52,25 +52,16 @@ equipment_df = load_sheet(
 # Core Calculation (Phase 1: Final ATK / DEF / HP)
 # =========================================================
 
-def calc_final_base_stats(character_id: str):
+def calc_final_base_stats(input_row: pd.Series):
     """
     Phase 1 calculation:
     Final ATK / DEF / HP
     (Only Base Stat + Equipment Main Flat)
     """
-
     # -----------------------------------------------------
-    # 1. Combat input
+    # 1. Unpack combat input
     # -----------------------------------------------------
-    input_row = combat_input_df[
-        combat_input_df["CharacterId"] == character_id
-    ]
-
-    if input_row.empty:
-        print(f"⚠️ No combat input found for {character_id}")
-        return None
-
-    input_row = input_row.iloc[0]
+    character_id = input_row["CharacterId"]
     level = input_row["Level"]
     equipment_id = input_row["EquipmentIdList[]"]
 
@@ -139,9 +130,13 @@ def calc_final_base_stats(character_id: str):
 # =========================================================
 
 if __name__ == "__main__":
-    print("\n========== Phase 1: Final Base Stat Test ==========")
+    print("\n========== Phase 1: Final Base Stat Calculation ==========")
 
-    for char_id in combat_input_df["CharacterId"].unique():
-        calc_final_base_stats(char_id)
+    results = []
+    # Iterate over each row in the combat input DataFrame
+    for index, row in combat_input_df.iterrows():
+        result = calc_final_base_stats(row)
+        if result:
+            results.append(result)
 
-    print("\n========== Done ==========")
+    print("\n========== All Calculations Done ==========")
