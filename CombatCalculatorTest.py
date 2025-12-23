@@ -1,7 +1,7 @@
 # CombatCalculatorTest.py
 import pandas as pd
 from pathlib import Path
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 
 # =========================================================
 # Path & Loader 檢查路徑跟載入表格
@@ -33,25 +33,43 @@ def load_sheet(excel_name: str, sheet_name: str) -> pd.DataFrame:
     return df
 
 
-# 類別檢查，防呆處理
+# =========================================================
+# Utils
+# =========================================================
+
 def to_bool(value: Any) -> bool:
     """
     Convert Excel/Sheet boolean-like value to Python bool.
     Accepts: TRUE/FALSE, True/False, 1/0, 'true'/'false', empty.
+    Also supports numpy boolean scalars like np.True_ / np.False_.
     """
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None:
         return False
+
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+
     if isinstance(value, bool):
         return value
+
     if isinstance(value, (int, float)):
         return value != 0
+
     if isinstance(value, str):
         s = value.strip().lower()
         if s in ("true", "t", "yes", "y", "1"):
             return True
         if s in ("false", "f", "no", "n", "0", ""):
             return False
-    return False
+
+    # Fallback for numpy.bool_ and other truthy objects
+    try:
+        return bool(value)
+    except Exception:
+        return False
 
 
 def clamp_int(x: Any, lo: int, hi: int, default: int = 0) -> int:
@@ -80,12 +98,16 @@ def norm_level_to_half(x: Any) -> float:
 
 def clean_id(x: Any) -> str:
     """
-    Normalize id strings: strip, remove NBSP, handle NaN.
+    Normalize id strings: strip, remove NBSP/zero-width, handle NaN.
     """
     if x is None:
         return ""
-    if isinstance(x, float) and pd.isna(x):
-        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+
     s = str(x)
     s = s.replace("\u00A0", "").replace("\u200b", "").strip()
     if s.lower() == "nan":
@@ -97,22 +119,17 @@ def clean_id(x: Any) -> str:
 # Load required tables 讀取表格
 # =========================================================
 
-# Character tables
 character_index_df = load_sheet("Character.xlsx", "CharacterIndex")
 base_stat_df = load_sheet("Character.xlsx", "CharacterBaseStatByLevel")
 
-# InputPanel
 combat_input_df = load_sheet("CombatInputPanel.xlsx", "CombatInputPanel")
 
-# Equipment table
 equipment_df = load_sheet("Equipment.xlsx", "Equipment")
 
-# Partner tables (split load)
 partner_level_df = load_sheet("Partner.xlsx", "PartnerLevelStat")
 partner_stack_df = load_sheet("Partner.xlsx", "PartnerStatStack")
 partner_type_df = load_sheet("Partner.xlsx", "PartnerStatType")
 
-# Affection table
 affection_df = load_sheet("Affection.xlsx", "AffectionByLevel")
 
 
@@ -139,7 +156,6 @@ if "PartnerId" in combat_input_df.columns:
 if "PartnerLevel" in combat_input_df.columns:
     combat_input_df["PartnerLevel"] = pd.to_numeric(combat_input_df["PartnerLevel"], errors="coerce").fillna(0.0).astype(float)
     combat_input_df["PartnerLevel"] = combat_input_df["PartnerLevel"].map(norm_level_to_half)
-
 if "PartnerStackCount" in combat_input_df.columns:
     combat_input_df["PartnerStackCount"] = pd.to_numeric(combat_input_df["PartnerStackCount"], errors="coerce").fillna(0).astype(int)
 
@@ -165,6 +181,10 @@ if "StatTypeId" in partner_type_df.columns:
     partner_type_df["StatTypeId"] = partner_type_df["StatTypeId"].map(clean_id)
 if "AffectStat" in partner_type_df.columns:
     partner_type_df["AffectStat"] = partner_type_df["AffectStat"].map(clean_id)
+if "ApplyStage" in partner_type_df.columns:
+    partner_type_df["ApplyStage"] = partner_type_df["ApplyStage"].map(clean_id)
+if "ValueType" in partner_type_df.columns:
+    partner_type_df["ValueType"] = partner_type_df["ValueType"].map(clean_id)
 
 # --- Affection ---
 if "AffectionLevel" in affection_df.columns:
@@ -176,14 +196,17 @@ if "ApplyStage" in affection_df.columns:
     affection_df["ApplyStage"] = affection_df["ApplyStage"].map(clean_id)
 
 # =========================================================
+# Debug Logs (table-level)
+# =========================================================
+print("PartnerLevelStat PartnerId uniques (head):", partner_level_df["PartnerId"].astype(str).unique()[:10])
+print("PartnerStatStack PartnerId uniques (head):", partner_stack_df["PartnerId"].astype(str).unique()[:10])
+
+
+# =========================================================
 # Partner Lookup Helpers 夥伴數值輔助函式
 # =========================================================
 
 def get_partner_flat(partner_id: Any, partner_level: Any) -> Tuple[float, float, float]:
-    """
-    PARTNER FLAT from PartnerLevelStat by (PartnerId, Level).
-    Returns (atk_flat, def_flat, hp_flat).
-    """
     pid = clean_id(partner_id)
     if pid == "":
         return 0.0, 0.0, 0.0
@@ -197,7 +220,6 @@ def get_partner_flat(partner_id: Any, partner_level: Any) -> Tuple[float, float,
         (partner_level_df["Level"] == lvl)
     ]
     if rows.empty:
-        # Debug: Check if ID exists at all to give better feedback
         check_id = partner_level_df[partner_level_df["PartnerId"] == pid]
         if check_id.empty:
             print(f"⚠️ PartnerLevelStat not found: PartnerId='{pid}' (ID not in table). Sample IDs: {partner_level_df['PartnerId'].head(5).tolist()}")
@@ -210,58 +232,85 @@ def get_partner_flat(partner_id: Any, partner_level: Any) -> Tuple[float, float,
     return float(r.get("Attack", 0.0)), float(r.get("Defense", 0.0)), float(r.get("Health", 0.0))
 
 
-def get_partner_pct(partner_id: Any, stack_count: int, is_bonus_applied: bool) -> Tuple[float, float, float]:
+def get_partner_pct_with_debug(partner_id: Any, stack_count: int, is_bonus_applied: bool) -> Tuple[Tuple[float, float, float], List[str]]:
     """
-    PARTNER % INCREASE from PartnerStatStack + PartnerStatType
-    - If is_bonus_applied is False: returns (0,0,0)
-    - Assumes StaticBase has only ONE stat type per partner (as per your rule).
-    Returns (atk_pct, def_pct, hp_pct) with unit like 0.12 = +12%
+    Same as get_partner_pct, but returns debug lines instead of printing them immediately.
     """
+    debug: List[str] = []
+
     if not is_bonus_applied:
-        return 0.0, 0.0, 0.0
+        return (0.0, 0.0, 0.0), debug
 
     pid = clean_id(partner_id)
     if pid == "":
-        return 0.0, 0.0, 0.0
+        return (0.0, 0.0, 0.0), debug
 
     idx = clamp_int(stack_count, 0, 4, default=0)
     value_col = f"Stack{idx}Value"
 
     stack_rows = partner_stack_df[partner_stack_df["PartnerId"] == pid]
     if stack_rows.empty:
-        print(f"⚠️ PartnerStatStack not found: PartnerId={pid}")
-        return 0.0, 0.0, 0.0
+        debug.append(f"⚠️ PartnerStatStack not found: PartnerId={pid}")
+        return (0.0, 0.0, 0.0), debug
 
     if len(stack_rows) > 1:
-        print(f"⚠️ PartnerStatStack has multiple rows for PartnerId={pid}. Using first row only (StaticBase rule).")
+        debug.append(f"⚠️ PartnerStatStack has multiple rows for PartnerId={pid}. Using first row only (StaticBase rule).")
 
     sr = stack_rows.iloc[0]
-    stat_type_id = clean_id(sr.get("StatTypeId", ""))
+    if "StatTypeId" not in sr.index:
+        debug.append(f"⚠️ PartnerStatStack missing column 'StatTypeId' for PartnerId={pid}. Columns={list(partner_stack_df.columns)}")
+        return (0.0, 0.0, 0.0), debug
+
+    raw_stat_type = sr.get("StatTypeId", "")
+    stat_type_id = clean_id(raw_stat_type)
     pct_value = float(sr.get(value_col, 0.0))
 
+# debug訊息
+    '''
+    debug.append(f"🧪 PartnerPct Debug: pid={pid}, stack={idx}, value_col={value_col}, pct_value={pct_value}")
+    debug.append(f"🧪 PartnerPct Debug: raw StatTypeId={repr(raw_stat_type)} -> cleaned={repr(stat_type_id)}")
+    '''
+    
     if stat_type_id == "":
-        print(f"⚠️ PartnerStatStack missing StatTypeId: PartnerId={pid}")
-        return 0.0, 0.0, 0.0
+        debug.append(f"⚠️ PartnerStatStack missing StatTypeId: PartnerId={pid}")
+        return (0.0, 0.0, 0.0), debug
 
     type_rows = partner_type_df[partner_type_df["StatTypeId"] == stat_type_id]
     if type_rows.empty:
-        print(f"⚠️ PartnerStatType not found: StatTypeId={stat_type_id}")
-        return 0.0, 0.0, 0.0
+        debug.append(f"⚠️ PartnerStatType not found: StatTypeId={stat_type_id}. Existing={partner_type_df['StatTypeId'].unique().tolist()}")
+        return (0.0, 0.0, 0.0), debug
 
     tr = type_rows.iloc[0]
 
-    apply_stage = clean_id(tr.get("ApplyStage", ""))
-    value_type = clean_id(tr.get("ValueType", ""))
-    is_percent_bool = to_bool(tr.get("IsPercent", False))
+    raw_apply_stage = tr.get("ApplyStage", "")
+    raw_value_type = tr.get("ValueType", "")
+    raw_is_percent = tr.get("IsPercent", False)
+    raw_affect_stat = tr.get("AffectStat", "")
 
+    apply_stage = clean_id(raw_apply_stage)
+    value_type = clean_id(raw_value_type)
+    is_percent_bool = to_bool(raw_is_percent)
+    affect_stat = clean_id(raw_affect_stat)
+
+# debug訊息
+    '''
+    debug.append(f"🧪 PartnerPct Debug: ApplyStage raw={repr(raw_apply_stage)} cleaned={repr(apply_stage)}")
+    debug.append(f"🧪 PartnerPct Debug: ValueType  raw={repr(raw_value_type)} cleaned={repr(value_type)}")
+    debug.append(f"🧪 PartnerPct Debug: IsPercent  raw={repr(raw_is_percent)} -> bool={is_percent_bool}")
+    debug.append(f"🧪 PartnerPct Debug: AffectStat raw={repr(raw_affect_stat)} cleaned={repr(affect_stat)}")
+    '''
+    
     if apply_stage != "StaticBase":
-        return 0.0, 0.0, 0.0
-    if value_type != "Increase" or not is_percent_bool:
-        return 0.0, 0.0, 0.0
+        debug.append(f"🚫 PartnerPct blocked: apply_stage != StaticBase ({apply_stage})")
+        return (0.0, 0.0, 0.0), debug
+    if value_type != "Increase":
+        debug.append(f"🚫 PartnerPct blocked: value_type != Increase ({value_type})")
+        return (0.0, 0.0, 0.0), debug
+    if not is_percent_bool:
+        debug.append(f"🚫 PartnerPct blocked: IsPercent is not True (raw={repr(raw_is_percent)})")
+        return (0.0, 0.0, 0.0), debug
 
-    affect_stat = clean_id(tr.get("AffectStat", ""))  # Attack/Defense/Health
     atk_pct = def_pct = hp_pct = 0.0
-
     if affect_stat == "Attack":
         atk_pct = pct_value
     elif affect_stat == "Defense":
@@ -269,9 +318,9 @@ def get_partner_pct(partner_id: Any, stack_count: int, is_bonus_applied: bool) -
     elif affect_stat == "Health":
         hp_pct = pct_value
     else:
-        print(f"⚠️ Unknown AffectStat='{affect_stat}' in PartnerStatType: StatTypeId={stat_type_id}")
+        debug.append(f"⚠️ Unknown AffectStat='{affect_stat}' in PartnerStatType: StatTypeId={stat_type_id}")
 
-    return atk_pct, def_pct, hp_pct
+    return (atk_pct, def_pct, hp_pct), debug
 
 
 # =========================================================
@@ -279,10 +328,6 @@ def get_partner_pct(partner_id: Any, stack_count: int, is_bonus_applied: bool) -
 # =========================================================
 
 def get_affection_flat(affection_level: Any) -> Tuple[float, float, float]:
-    """
-    AFFECTION FLAT from AffectionByLevel (StaticBase).
-    Returns (atk_flat, def_flat, hp_flat) where each is Total value for that level.
-    """
     if affection_level is None or (isinstance(affection_level, float) and pd.isna(affection_level)):
         lvl = 1
     else:
@@ -295,7 +340,6 @@ def get_affection_flat(affection_level: Any) -> Tuple[float, float, float]:
         (affection_df["AffectionLevel"] == lvl) &
         (affection_df["ApplyStage"] == "StaticBase")
     ]
-
     if rows.empty:
         print(f"⚠️ AffectionByLevel not found: AffectionLevel={lvl} (use 0)")
         return 0.0, 0.0, 0.0
@@ -308,31 +352,10 @@ def get_affection_flat(affection_level: Any) -> Tuple[float, float, float]:
 
 
 # =========================================================
-# Core Calculation (Current Phase: Base + Partner + Affection + EquipmentFlat)
+# Core Calculation
 # =========================================================
 
 def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
-    """
-    Current calculation:
-    Final = (BASE * (1 + %Inc) + PARTNER_FLAT + GEAR_FLAT + AFFECTION_FLAT)
-            * (1 + PARTNER_% + EQUIPMENT_%)
-            + EQUIPMENT_FLAT
-
-    Implemented now:
-    - BASE from CharacterBaseStatByLevel
-    - PARTNER_FLAT from PartnerLevelStat
-    - PARTNER_% from PartnerStatStack/Type (when IsPartnerBonusApplied)
-    - AFFECTION_FLAT from AffectionByLevel
-    - EQUIPMENT_FLAT from Equipment MainStat (Flat only)
-
-    Not yet (set to 0):
-    - ATK/DEF/HP %Increase (potential nodes)
-    - GEAR FLAT (memory fragments)
-    - EQUIPMENT % (other equip increases)
-    """
-    # -----------------------------------------------------
-    # 1. Unpack combat input
-    # -----------------------------------------------------
     character_id = clean_id(input_row.get("CharacterId", ""))
     level = norm_level_to_half(input_row.get("Level", 0.0))
 
@@ -345,14 +368,10 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
 
     affection_level = input_row.get("AffectionLevel", 1)
 
-    # -----------------------------------------------------
-    # 2. Base stat lookup
-    # -----------------------------------------------------
     base_rows = base_stat_df[
         (base_stat_df["CharacterId"] == character_id) &
         (base_stat_df["Level"] == level)
     ]
-
     if base_rows.empty:
         print(f"❌ Base stat not found: {character_id} Lv{level}")
         return None
@@ -362,9 +381,6 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
     base_def = float(base_row.get("Defense", 0.0))
     base_hp = float(base_row.get("Health", 0.0))
 
-    # -----------------------------------------------------
-    # 3. Not implemented yet -> 0
-    # -----------------------------------------------------
     atk_pct_increase = 0.0
     def_pct_increase = 0.0
     hp_pct_increase = 0.0
@@ -377,24 +393,15 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
     equipment_def_pct = 0.0
     equipment_hp_pct = 0.0
 
-    # -----------------------------------------------------
-    # 4. Partner buckets
-    # -----------------------------------------------------
     partner_atk_flat, partner_def_flat, partner_hp_flat = get_partner_flat(partner_id, partner_level)
-    partner_atk_pct, partner_def_pct, partner_hp_pct = get_partner_pct(
+    (partner_atk_pct, partner_def_pct, partner_hp_pct), partner_pct_debug = get_partner_pct_with_debug(
         partner_id=partner_id,
         stack_count=partner_stack_count,
         is_bonus_applied=is_partner_bonus_applied
     )
 
-    # -----------------------------------------------------
-    # 5. Affection buckets
-    # -----------------------------------------------------
     affection_flat_atk, affection_flat_def, affection_flat_hp = get_affection_flat(affection_level)
 
-    # -----------------------------------------------------
-    # 6. Equipment main stat -> EQUIPMENT_FLAT bucket
-    # -----------------------------------------------------
     equipment_atk_flat = 0.0
     equipment_def_flat = 0.0
     equipment_hp_flat = 0.0
@@ -417,9 +424,6 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
             else:
                 print(f"⚠️ Unknown Equipment MainStatType='{stat_type}' for EquipmentId={equipment_id}")
 
-    # -----------------------------------------------------
-    # 7. Apply formulas
-    # -----------------------------------------------------
     atk_base_block = base_atk * (1.0 + atk_pct_increase) + partner_atk_flat + gear_flat_atk + affection_flat_atk
     atk_multiplier = 1.0 + partner_atk_pct + equipment_atk_pct
     final_atk = atk_base_block * atk_multiplier + equipment_atk_flat
@@ -432,9 +436,7 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
     hp_multiplier = 1.0 + partner_hp_pct + equipment_hp_pct
     final_hp = hp_base_block * hp_multiplier + equipment_hp_flat
 
-    # -----------------------------------------------------
-    # 8. Logs
-    # -----------------------------------------------------
+    # ---------------- Logs ----------------
     print("\n------------------------------------------")
     print(f"Character: {character_id}")
     print(f"Level: {level}")
@@ -449,6 +451,11 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
         print(f"[Partner] PartnerId={pid_str}, PartnerLevel={pl}, StackCount={sc}, BonusApplied={is_partner_bonus_applied}")
         print(f"         Flat: ATK={partner_atk_flat}, DEF={partner_def_flat}, HP={partner_hp_flat}")
         print(f"         Pct : ATK%={partner_atk_pct}, DEF%={partner_def_pct}, HP%={partner_hp_pct}")
+
+        # ✅ Debug lines appear INSIDE this character block now
+        if partner_pct_debug:
+            for line in partner_pct_debug:
+                print(line)
     else:
         print("[Partner] None")
 
