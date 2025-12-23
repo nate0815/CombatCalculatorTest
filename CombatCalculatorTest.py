@@ -324,7 +324,7 @@ def get_partner_pct_with_debug(partner_id: Any, stack_count: int, is_bonus_appli
 
 
 # =========================================================
-# Affection Lookup Helper
+# Affection Lookup Helper 好感度
 # =========================================================
 
 def get_affection_flat(affection_level: Any) -> Tuple[float, float, float]:
