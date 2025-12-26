@@ -400,30 +400,30 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
         is_bonus_applied=is_partner_bonus_applied
     )
 
+    # Affection
     affection_flat_atk, affection_flat_def, affection_flat_hp = get_affection_flat(affection_level)
 
-    equipment_atk_flat = 0.0
-    equipment_def_flat = 0.0
-    equipment_hp_flat = 0.0
+    # Equipment list (comma separated)
+    equipment_ids = parse_csv_str_list(input_row.get("EquipmentIdList[]", ""))
+    equipment_atk_flat, equipment_def_flat, equipment_hp_flat, equipment_debug = calc_equipment_flat_from_list(equipment_ids)
 
-    if equipment_id not in (0, None, "") and not (isinstance(equipment_id, float) and pd.isna(equipment_id)):
-        equip_rows = equipment_df[equipment_df["EquipmentId"] == equipment_id]
-        if equip_rows.empty:
-            print(f"⚠️ Equipment not found: {equipment_id}")
-        else:
-            equip_row = equip_rows.iloc[0]
-            stat_type = clean_id(equip_row.get("MainStatType", ""))
-            value = float(equip_row.get("MainStatValue", 0.0))
+    # Memory Fragment contribution (main + random + set)
+    (mf_atk_pct, mf_def_pct, mf_hp_pct,
+     mf_gear_flat_atk, mf_gear_flat_def, mf_gear_flat_hp,
+     mf_debug_lines) = calc_memory_fragment_contribution(input_row)
 
-            if stat_type == "AttackFlat":
-                equipment_atk_flat += value
-            elif stat_type == "DefenseFlat":
-                equipment_def_flat += value
-            elif stat_type == "HealthPointFlat":
-                equipment_hp_flat += value
-            else:
-                print(f"⚠️ Unknown Equipment MainStatType='{stat_type}' for EquipmentId={equipment_id}")
+    # Apply MF into variables
+    atk_pct_increase += mf_atk_pct
+    def_pct_increase += mf_def_pct
+    hp_pct_increase += mf_hp_pct
 
+    gear_flat_atk += mf_gear_flat_atk
+    gear_flat_def += mf_gear_flat_def
+    gear_flat_hp += mf_gear_flat_hp
+
+    # -----------------------------------------------------
+    # Final formulas
+    # -----------------------------------------------------
     atk_base_block = base_atk * (1.0 + atk_pct_increase) + partner_atk_flat + gear_flat_atk + affection_flat_atk
     atk_multiplier = 1.0 + partner_atk_pct + equipment_atk_pct
     final_atk = atk_base_block * atk_multiplier + equipment_atk_flat
