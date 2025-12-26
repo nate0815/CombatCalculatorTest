@@ -415,11 +415,11 @@ def calc_final_base_stats(input_row: pd.Series) -> Dict[str, Any] | None:
             stat_type = clean_id(equip_row.get("MainStatType", ""))
             value = float(equip_row.get("MainStatValue", 0.0))
 
-            if stat_type == "ATK_FLAT":
+            if stat_type == "AttackFlat":
                 equipment_atk_flat += value
-            elif stat_type == "DEF_FLAT":
+            elif stat_type == "DefenseFlat":
                 equipment_def_flat += value
-            elif stat_type == "HP_FLAT":
+            elif stat_type == "HealthPointFlat":
                 equipment_hp_flat += value
             else:
                 print(f"⚠️ Unknown Equipment MainStatType='{stat_type}' for EquipmentId={equipment_id}")
