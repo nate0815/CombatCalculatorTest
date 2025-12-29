@@ -775,3 +775,7 @@ if __name__ == "__main__":
         print(out_df.to_string(index=False))
     else:
         print("(no results)")
+
+print("計算完成！")
+
+input("按 Enter 鍵結束程式...")
