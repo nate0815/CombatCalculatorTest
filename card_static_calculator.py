@@ -9,15 +9,17 @@ Responsibility:
 
 MVP supports EffectType:
 - Damage / Shield / Heal
-
-FlatValue supports None/empty/"None" -> treated as 0.0
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List
 
-from models import CharacterSnapshot
-from card_repository import CardDef, CardEffectDef
+from models import (
+    CharacterSnapshot,
+    CardDef,
+    CardEffectDef,
+    CardEffectResult,
+    CardResult,
+)
 
 
 # =========================================================
@@ -37,36 +39,11 @@ def _get_base_stat(snapshot: CharacterSnapshot, scale_stat: str) -> float:
         return float(snapshot.final_def)
     if key == "HP":
         return float(snapshot.final_hp)
-    # Unknown scale stat -> 0 (safe fallback)
     return 0.0
 
 
 def _norm_effect_type(effect_type: str) -> str:
     return (effect_type or "").strip()
-
-
-# =========================================================
-# Output Models
-# =========================================================
-
-@dataclass(frozen=True)
-class CardEffectResult:
-    effect_index: int
-    effect_type: str
-    scale_stat: str
-    base_stat: float
-    multiplier: float
-    flat_value: float
-    value: float
-
-
-@dataclass(frozen=True)
-class CardResult:
-    card_id: str
-    character_id: str
-    epiphany_tier: int
-    effects: List[CardEffectResult]
-    totals: Dict[str, float]  # {"Damage": x, "Heal": y, "Shield": z}
 
 
 # =========================================================
@@ -107,12 +84,8 @@ def calc_card(snapshot: CharacterSnapshot, card: CardDef, verbose: bool = False)
             results.append(r)
 
             et = _norm_effect_type(r.effect_type)
-            if et in totals:
-                totals[et] += r.value
-            else:
-                # Unknown effect types are kept but not summed in totals (future-proof)
-                totals.setdefault(et, 0.0)
-                totals[et] += r.value
+            totals.setdefault(et, 0.0)
+            totals[et] += r.value
 
             debug_print(
                 verbose,

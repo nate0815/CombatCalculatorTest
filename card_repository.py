@@ -8,13 +8,15 @@ Responsibility:
 - Provide query APIs for calculator / main
 
 Notes:
-- FlatValue supports None / empty -> treated as 0.0
+- FlatValue supports None / empty / "None" -> treated as 0.0
 """
 
 import pandas as pd
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from models import CardDef, CardEffectDef
+
 
 # =========================================================
 # Path & Loader
@@ -60,37 +62,16 @@ def to_int(x: Any, default: int = 0) -> int:
 
 
 def to_float(x: Any, default: float = 0.0) -> float:
-    # supports "None" / "" -> default
-    s = str(x).strip() if x is not None else ""
+    # supports "None" / "" / NaN -> default
+    if x is None:
+        return default
+    s = str(x).strip()
     if s == "" or s.lower() in ("none", "nan"):
         return default
     try:
         return float(x)
     except Exception:
         return default
-
-
-# =========================================================
-# Data Models
-# =========================================================
-
-@dataclass(frozen=True)
-class CardEffectDef:
-    card_id: str
-    effect_index: int
-    effect_type: str      # Damage / Shield / Heal (MVP)
-    scale_stat: str       # ATK / DEF / HP
-    multiplier: float     # 1.0 = 100%
-    flat_value: float     # None/empty -> 0.0
-
-
-@dataclass(frozen=True)
-class CardDef:
-    card_id: str
-    character_id: str
-    group_id: str
-    epiphany_tier: int
-    effects: List[CardEffectDef]
 
 
 # =========================================================
@@ -115,10 +96,6 @@ class CardRepository:
         card_df = load_sheet(self.excel_name, "Card")
         effect_df = load_sheet(self.excel_name, "CardEffect")
 
-        # Normalize columns just in case
-        card_df.columns = card_df.columns.astype(str).str.strip()
-        effect_df.columns = effect_df.columns.astype(str).str.strip()
-
         # Parse effects grouped by CardId
         effects_by_card: Dict[str, List[CardEffectDef]] = {}
 
@@ -138,8 +115,8 @@ class CardRepository:
             effects_by_card.setdefault(card_id, []).append(eff)
 
         # Sort effects by EffectIndex
-        for cid, effs in effects_by_card.items():
-            effects_by_card[cid] = sorted(effs, key=lambda e: e.effect_index)
+        for cid in list(effects_by_card.keys()):
+            effects_by_card[cid] = sorted(effects_by_card[cid], key=lambda e: e.effect_index)
 
         # Build CardDef
         self._cards_by_id.clear()
@@ -164,14 +141,17 @@ class CardRepository:
             )
 
             self._cards_by_id[card_id] = card
+
             if character_id:
                 self._cards_by_character.setdefault(character_id, []).append(card)
+
             if group_id:
                 self._cards_by_group.setdefault(group_id, []).append(card)
 
-        # Optional: stable ordering (by CardId)
+        # Optional: stable ordering
         for k in list(self._cards_by_character.keys()):
             self._cards_by_character[k] = sorted(self._cards_by_character[k], key=lambda c: c.card_id)
+
         for k in list(self._cards_by_group.keys()):
             self._cards_by_group[k] = sorted(self._cards_by_group[k], key=lambda c: (c.epiphany_tier, c.card_id))
 

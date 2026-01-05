@@ -27,7 +27,6 @@ def main():
             "DEF": round(s.final_def, 2),
             "HP": round(s.final_hp, 2),
         } for s in snapshots])
-
         print(df.to_string(index=False))
 
     # -----------------------------
@@ -57,7 +56,6 @@ def main():
             print(f"⚠️ No cards found for character: {s.character_id}")
             continue
 
-        # verbose=True 會印每張卡的 effect 明細；你也可以改成 False 只看 summary
         for c in cards:
             r = calc_card(s, c, verbose=True)
 
@@ -70,17 +68,11 @@ def main():
                 "ShieldTotal": round(r.totals.get("Shield", 0.0), 2),
             })
 
-            
-
     print("\n=== Phase 2 Summary ===")
     if not card_rows:
         print("(no card results)")
     else:
-        df2 = pd.DataFrame(card_rows)
-
-        # 你也可以依需求排序：先角色再卡
-        df2 = df2.sort_values(by=["CharacterId", "CardId"]).reset_index(drop=True)
-
+        df2 = pd.DataFrame(card_rows).sort_values(by=["CharacterId", "CardId"]).reset_index(drop=True)
         print(df2.to_string(index=False))
 
     print("\nPipeline done.")
