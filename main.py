@@ -57,7 +57,7 @@ def main():
             continue
 
         for c in cards:
-            r = calc_card(s, c, verbose=True)
+            r = calc_card(s, c, verbose=False)
 
             card_rows.append({
                 "CharacterId": s.character_id,
