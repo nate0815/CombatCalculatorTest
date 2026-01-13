@@ -25,6 +25,7 @@ from models import (
 class CardRepository:
     """
     Load Card / CardEffect from Excel.
+    負責從 Excel 載入卡牌與效果資料。
     Supports:
     - Party card pool: load_cards_for_characters(["Yuki","Cassius","Mika"])
     - NEW: ApCost (int). Default to 1 if missing/blank.
@@ -51,6 +52,7 @@ class CardRepository:
         character_ids: List[str],
     ) -> Tuple[List[Card], Dict[str, List[CardEffect]]]:
         """
+        根據角色 ID 列表載入對應的卡牌與效果。
         Load cards filtered by character_ids, and all their effects.
         Returns:
             cards(list), effects_by_card(dict)

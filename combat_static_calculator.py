@@ -47,6 +47,7 @@ def _pick_first_existing_col(df: pd.DataFrame, candidates: List[str]) -> Optiona
 # =========================================================
 def calc_all_character_snapshots(verbose: bool = False) -> List[CharacterSnapshot]:
     """
+    計算所有角色的靜態快照 (Phase 1)。
     MVP Phase1 calculator to keep battle simulator runnable.
 
     Reads:

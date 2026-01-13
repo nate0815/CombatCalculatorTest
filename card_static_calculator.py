@@ -19,6 +19,7 @@ from models import (
 class CardEffectResult:
     """
     A lightweight, structured result of applying ONE card effect.
+    單一卡牌效果的計算結果 (數值預覽)。
     This module is kept as a reusable "card math" helper layer.
 
     Note:
@@ -36,6 +37,7 @@ class CardEffectResult:
 class CardStaticCalculator:
     """
     Card static effect calculator (MVP).
+    卡牌靜態數值計算器。
 
     Responsibilities:
     - Convert (CardEffect + ActiveCharacterSnapshot + PartySnapshot) into numeric value.
@@ -49,6 +51,7 @@ class CardStaticCalculator:
         effect: CardEffect,
     ) -> float:
         """
+        計算效果數值 = 基礎值(ATK/DEF/HP) * 倍率 + 固定值
         value = base_stat(effect.scale_stat) * multiplier + flat_value
 
         MVP decisions:
@@ -75,6 +78,7 @@ class CardStaticCalculator:
         effects_by_card: Dict[str, List[CardEffect]],
     ) -> List[CardEffectResult]:
         """
+        預覽卡牌的所有效果數值 (不改變戰鬥狀態)。
         Returns a list of computed effect results for a card (no state mutation).
         Useful for debug / UI tool / future report formatting.
         """

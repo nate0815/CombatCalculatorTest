@@ -23,6 +23,7 @@ class BattleSummaryRow:
 class BattleReporter:
     """
     Writes battle outputs to an Excel report.
+    負責收集戰鬥結果並寫入 Excel 報表。
 
     Goal for current phase:
     - Keep full console logs in BattleSimulator (host machine).
@@ -68,6 +69,7 @@ class BattleReporter:
         extra_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[Path]:
         """
+        將收集到的資料寫入 Excel 檔案。
         Write report if report_dir & report_name available.
         Returns output path, or None if not configured.
         """

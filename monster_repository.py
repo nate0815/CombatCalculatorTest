@@ -26,6 +26,7 @@ from models import (
 class MonsterRepository:
     """
     Load MonsterIndex / MonsterBaseStat / MonsterSkill from Excel.
+    負責從 Excel 載入怪物資料 (索引、基礎數值、技能)。
 
     Current MVP assumes:
     - MonsterIndex: MonsterId, MonsterRank, MonsterWeight
@@ -44,6 +45,9 @@ class MonsterRepository:
         sheet_base_stat: str,
         sheet_skill: str,
     ) -> Tuple[List[MonsterIndex], Dict[str, MonsterBaseStat], List[MonsterSkill]]:
+        """
+        載入所有怪物相關資料表，並解析為物件。
+        """
         index_df = self._load_sheet(excel_name, sheet_index)
         base_df = self._load_sheet(excel_name, sheet_base_stat)
         skill_df = self._load_sheet(excel_name, sheet_skill)

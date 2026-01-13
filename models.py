@@ -17,26 +17,35 @@ class LogLevel(str, Enum):
 
 
 class TargetType(str, Enum):
+    """
+    技能或卡牌的目標類型
+    """
     # Card side (you already use these)
-    EnemySingle = "EnemySingle"
-    EnemyAll = "EnemyAll"
-    Self = "Self"
-    AllySingle = "AllySingle"
-    AllyAll = "AllyAll"
+    EnemySingle = "EnemySingle"  # 敵方單體
+    EnemyAll = "EnemyAll"        # 敵方全體
+    Self = "Self"                # 自身
+    AllySingle = "AllySingle"    # 我方單體
+    AllyAll = "AllyAll"          # 我方全體
 
     # Monster side (current MVP)
-    Player = "Player"
+    Player = "Player"            # 玩家 (怪物攻擊目標)
 
 
 class EffectType(str, Enum):
-    Damage = "Damage"
-    Shield = "Shield"
-    Heal = "Heal"
-    Buff = "Buff"
-    Debuff = "Debuff"
+    """
+    卡牌效果類型
+    """
+    Damage = "Damage"  # 傷害
+    Shield = "Shield"  # 護盾
+    Heal = "Heal"      # 治療
+    Buff = "Buff"      # 增益 (未實作)
+    Debuff = "Debuff"  # 減益 (未實作)
 
 
 class ScaleStat(str, Enum):
+    """
+    數值加成的參照屬性 (例如：造成攻擊力 100% 的傷害)
+    """
     ATK = "ATK"
     DEF = "DEF"
     HP = "HP"
@@ -63,26 +72,26 @@ class OnEndTurnAction(str, Enum):
 # ---- Monster skill system (MVP) ----
 
 class MonsterSkillType(str, Enum):
-    Attack = "Attack"
-    AddShield = "AddShield"
-    Buff = "Buff"
-    Debuff = "Debuff"
+    Attack = "Attack"       # 攻擊
+    AddShield = "AddShield" # 增加護盾
+    Buff = "Buff"           # 增益
+    Debuff = "Debuff"       # 減益
 
 
 class ReloadTiming(str, Enum):
     # You have unified to this in sheet
-    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"
+    AfterEnemyAttackPhase = "AfterEnemyAttackPhase" # 敵方攻擊階段結束後重置計數器
 
 
 class CounterMode(str, Enum):
-    Disabled = "Disabled"
-    Enabled = "Enabled"
-    Conditional = "Conditional"
+    Disabled = "Disabled"       # 停用
+    Enabled = "Enabled"         # 啟用
+    Conditional = "Conditional" # 條件式
 
 
 class CounterStartTrigger(str, Enum):
     # Your updated requirement: any card played (even non-attack) reduces counter
-    OnPlayerPlayCard = "OnPlayerPlayCard"
+    OnPlayerPlayCard = "OnPlayerPlayCard" # 當玩家打出任意卡牌時觸發
 
     # (reserved / future)
     OnPlayerAttackCard = "OnPlayerAttackCard"
@@ -91,8 +100,8 @@ class CounterStartTrigger(str, Enum):
 
 class EnemyPhaseActionRule(str, Enum):
     None_ = "None"
-    ActOnce = "ActOnce"
-    ActIfNotActedThisTurn = "ActIfNotActedThisTurn"
+    ActOnce = "ActOnce"                             # 每回合行動一次
+    ActIfNotActedThisTurn = "ActIfNotActedThisTurn" # 若本回合尚未行動則行動 (補刀/補行動)
 
 
 # =========================================================
@@ -103,6 +112,7 @@ class EnemyPhaseActionRule(str, Enum):
 class CharacterSnapshot:
     """
     Result of Phase 1: Character Static Calculation
+    角色靜態數值快照 (Phase 1 計算結果)
     This is a frozen view of a character final base stats (ATK/DEF/HP).
     """
     character_id: str
@@ -122,6 +132,7 @@ class CharacterSnapshot:
 @dataclass
 class PlayerPartySnapshot:
     """
+    玩家隊伍快照 (MVP: 共用血條)
     MVP rule:
     - Team HP is shared (single HP bar) = sum of members' HP.
     - Damage taken reduces team_hp.
@@ -170,6 +181,9 @@ class Card:
 
 @dataclass
 class CardEffect:
+    """
+    卡牌效果定義
+    """
     card_id: str
     effect_index: int
 
@@ -214,6 +228,9 @@ class MonsterBaseStat:
 
 @dataclass
 class MonsterSkill:
+    """
+    怪物技能定義
+    """
     skill_id: str
     monster_id: str
     skill_type: MonsterSkillType
@@ -236,6 +253,9 @@ class MonsterSkill:
 
 @dataclass
 class MonsterState:
+    """
+    怪物戰鬥時的動態狀態 (HP, 護盾, 計數器等)
+    """
     monster_id: str
 
     hp: float

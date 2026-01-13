@@ -25,6 +25,7 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 # =========================================================
 def load_party_snapshots() -> PlayerPartySnapshot:
     """
+    載入隊伍快照 (Phase 1)。
     Reuse Phase1 calculator.
     Expected:
       combat_static_calculator.calc_all_character_snapshots() -> List[CharacterSnapshot]
@@ -65,6 +66,7 @@ def load_party_snapshots() -> PlayerPartySnapshot:
 # CLI
 # =========================================================
 def ask_battle_count() -> int:
+    """詢問使用者要模擬的戰鬥次數"""
     while True:
         s = input("請輸入要模擬戰鬥的次數（清空任一方血量算 1 次）：").strip()
         try:
@@ -78,6 +80,7 @@ def ask_battle_count() -> int:
 
 
 def ask_confirm(n: int) -> bool:
+    """確認是否開始"""
     s = input(f"你確定要開始模擬 {n} 次戰鬥嗎？輸入 Y 開始，其它任意鍵取消：").strip()
     return s.upper() == "Y"
 
@@ -88,6 +91,7 @@ def ask_confirm(n: int) -> bool:
 def main() -> None:
     # -------------------------
     # 1) Ask user
+    # 1) 詢問使用者設定
     # -------------------------
     battle_count = ask_battle_count()
     if not ask_confirm(battle_count):
@@ -96,12 +100,14 @@ def main() -> None:
 
     # -------------------------
     # 2) Load party snapshot (Phase1)
+    # 2) 載入隊伍資料 (Phase 1 計算結果)
     # -------------------------
     party = load_party_snapshots()
     party_character_ids = [m.character_id for m in party.members]
 
     # -------------------------
     # 3) Load cards (Party pool)
+    # 3) 載入卡牌資料 (根據隊伍成員篩選)
     # -------------------------
     card_repo = CardRepository(data_dir=DATA_DIR, log_level=LogLevel.INFO)
     party_cards, effects_by_card = card_repo.load_cards_for_characters(
@@ -119,6 +125,7 @@ def main() -> None:
 
     # -------------------------
     # 4) Load monsters
+    # 4) 載入怪物資料
     # -------------------------
     monster_repo = MonsterRepository(data_dir=DATA_DIR, log_level=LogLevel.INFO)
     monster_indexes, monster_base_stats, monster_skills = monster_repo.load_monsters(
@@ -130,6 +137,7 @@ def main() -> None:
 
     # -------------------------
     # 5) Prepare reporter (NO EventLog in Excel)
+    # 5) 準備報表產生器 (設定不輸出 EventLog 到 Excel 以節省效能)
     # -------------------------
     report_name = make_default_report_name(prefix="battle_report")
     reporter = BattleReporter(
@@ -141,6 +149,7 @@ def main() -> None:
 
     # -------------------------
     # 6) Run simulation
+    # 6) 執行戰鬥模擬
     # -------------------------
     config = BattleConfig(
         ap_max=3,
@@ -162,6 +171,7 @@ def main() -> None:
 
     # -------------------------
     # 7) Console summary (簡潔統計)
+    # 7) 控制台輸出簡易統計
     # -------------------------
     player_wins = sum(1 for r in results if r.winner == "Player")
     enemy_wins = sum(1 for r in results if r.winner == "Enemy")
@@ -176,6 +186,7 @@ def main() -> None:
 
     # -------------------------
     # 8) Export Excel report (Summary + Config only)
+    # 8) 匯出 Excel 報表
     # -------------------------
     extra_config = {
         "battle_count": battle_count,
