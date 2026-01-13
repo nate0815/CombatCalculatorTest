@@ -1,147 +1,183 @@
-"""
-monster_repository.py
-Phase: Monster Data (Repository)
+# monster_repository.py
+from __future__ import annotations
 
-Responsibility:
-- Load Monster.xlsx sheets: MonsterIndex / MonsterBaseStat / MonsterSkill
-- Build in-memory MonsterDef objects (index + base + skill list)
-- Provide query APIs for battle simulator
-
-Expected columns:
-- MonsterIndex: MonsterId, MonsterRank, MonsterWeight
-- MonsterBaseStat: MonsterId, Level, Attack, Defense, Health
-- MonsterSkill:
-    SkillId, MonsterId, SkillType, Value,
-    CounterMax, ReloadTiming, CounterMode, CounterStartTrigger, EnemyPhaseActionRule, Target
-"""
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-from models import MonsterBaseStat, MonsterSkillDef, MonsterDef
 
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "Data"
-
-
-def load_sheet(excel_name: str, sheet_name: str) -> pd.DataFrame:
-    path = DATA_DIR / excel_name
-    if not path.exists():
-        raise FileNotFoundError(f"❌ Excel file not found: {path}")
-    df = pd.read_excel(path, sheet_name=sheet_name)
-    df.columns = df.columns.astype(str).str.strip()
-    return df
-
-
-def clean_id(x: Any) -> str:
-    if x is None:
-        return ""
-    try:
-        if pd.isna(x):
-            return ""
-    except Exception:
-        pass
-    s = str(x).replace("\u00A0", "").replace("\u200b", "").strip()
-    if s.lower() in ("nan", "none", ""):
-        return ""
-    return s
+from models import (
+    CounterMode,
+    CounterStartTrigger,
+    EnemyPhaseActionRule,
+    LogLevel,
+    MonsterBaseStat,
+    MonsterIndex,
+    MonsterSkill,
+    MonsterSkillType,
+    ReloadTiming,
+    TargetType,
+    parse_enum,
+)
 
 
-def to_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(float(x))
-    except Exception:
-        return default
-
-
-def to_float(x: Any, default: float = 0.0) -> float:
-    try:
-        if x is None:
-            return default
-        s = str(x).strip()
-        if s == "" or s.lower() in ("none", "nan"):
-            return default
-        return float(x)
-    except Exception:
-        return default
-
-
-def to_str(x: Any, default: str = "") -> str:
-    s = clean_id(x)
-    return s if s else default
-
-
+@dataclass
 class MonsterRepository:
-    def __init__(self, excel_name: str = "Monster.xlsx"):
-        self.excel_name = excel_name
-        self._monsters_by_id: Dict[str, MonsterDef] = {}
+    """
+    Load MonsterIndex / MonsterBaseStat / MonsterSkill from Excel.
 
-    def load(self) -> None:
-        idx_df = load_sheet(self.excel_name, "MonsterIndex")
-        base_df = load_sheet(self.excel_name, "MonsterBaseStat")
-        skill_df = load_sheet(self.excel_name, "MonsterSkill")
+    Current MVP assumes:
+    - MonsterIndex: MonsterId, MonsterRank, MonsterWeight
+    - MonsterBaseStat: MonsterId, Level, Attack, Defense, Health
+    - MonsterSkill: SkillId, MonsterId, SkillType, Value, CounterMax,
+                    ReloadTiming, CounterMode, CounterStartTrigger,
+                    EnemyPhaseActionRule, Target
+    """
+    data_dir: Path
+    log_level: LogLevel = LogLevel.INFO
 
-        # Base stats by monster id (MVP: Level=1 single row per monster)
-        base_by_id: Dict[str, MonsterBaseStat] = {}
-        for _, row in base_df.iterrows():
-            mid = clean_id(row.get("MonsterId"))
-            if not mid:
-                continue
-            base_by_id[mid] = MonsterBaseStat(
+    def load_monsters(
+        self,
+        excel_name: str,
+        sheet_index: str,
+        sheet_base_stat: str,
+        sheet_skill: str,
+    ) -> Tuple[List[MonsterIndex], Dict[str, MonsterBaseStat], List[MonsterSkill]]:
+        index_df = self._load_sheet(excel_name, sheet_index)
+        base_df = self._load_sheet(excel_name, sheet_base_stat)
+        skill_df = self._load_sheet(excel_name, sheet_skill)
+
+        indexes = self._parse_index(index_df)
+        base_stats = self._parse_base_stat(base_df)
+        skills = self._parse_skills(skill_df)
+
+        self._log_info(
+            f"[Monster] Loaded {len(indexes)} monsters: {', '.join(m.monster_id for m in indexes)}"
+        )
+        return indexes, base_stats, skills
+
+    # -----------------------------------------------------
+    # Internal: Loaders
+    # -----------------------------------------------------
+
+    def _load_sheet(self, excel_name: str, sheet_name: str) -> pd.DataFrame:
+        path = self.data_dir / excel_name
+        if not path.exists():
+            raise FileNotFoundError(f"❌ Excel file not found: {path}")
+
+        try:
+            df = pd.read_excel(path, sheet_name=sheet_name)
+        except ValueError:
+            raise ValueError(f"❌ Sheet '{sheet_name}' not found in {excel_name}")
+
+        df.columns = df.columns.astype(str).str.strip()
+        return df
+
+    # -----------------------------------------------------
+    # Internal: Parsers
+    # -----------------------------------------------------
+
+    def _parse_index(self, df: pd.DataFrame) -> List[MonsterIndex]:
+        required = ["MonsterId", "MonsterRank", "MonsterWeight"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"❌ MonsterIndex missing column: {col}")
+
+        out: List[MonsterIndex] = []
+        for _, row in df.iterrows():
+            mid = str(row["MonsterId"]).strip()
+            rank = str(row["MonsterRank"]).strip()
+            w = row.get("MonsterWeight", 1)
+            weight = int(w) if (w is not None and not pd.isna(w)) else 1
+            out.append(MonsterIndex(monster_id=mid, monster_rank=rank, monster_weight=weight))
+        return out
+
+    def _parse_base_stat(self, df: pd.DataFrame) -> Dict[str, MonsterBaseStat]:
+        required = ["MonsterId", "Level", "Attack", "Defense", "Health"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"❌ MonsterBaseStat missing column: {col}")
+
+        out: Dict[str, MonsterBaseStat] = {}
+        for _, row in df.iterrows():
+            mid = str(row["MonsterId"]).strip()
+            lvl = int(row["Level"]) if not pd.isna(row["Level"]) else 1
+            atk = float(row["Attack"]) if not pd.isna(row["Attack"]) else 0.0
+            de = float(row["Defense"]) if not pd.isna(row["Defense"]) else 0.0
+            hp = float(row["Health"]) if not pd.isna(row["Health"]) else 0.0
+
+            out[mid] = MonsterBaseStat(
                 monster_id=mid,
-                level=to_int(row.get("Level"), 1),
-                attack=to_float(row.get("Attack"), 0.0),
-                defense=to_float(row.get("Defense"), 0.0),
-                health=to_float(row.get("Health"), 0.0),
+                level=lvl,
+                attack=atk,
+                defense=de,
+                health=hp,
             )
+        return out
 
-        # Skills grouped by monster id
-        skills_by_id: Dict[str, List[MonsterSkillDef]] = {}
-        for _, row in skill_df.iterrows():
-            skill_id = clean_id(row.get("SkillId"))
-            mid = clean_id(row.get("MonsterId"))
-            if not skill_id or not mid:
-                continue
+    def _parse_skills(self, df: pd.DataFrame) -> List[MonsterSkill]:
+        required = [
+            "SkillId",
+            "MonsterId",
+            "SkillType",
+            "Value",
+            "CounterMax",
+            "ReloadTiming",
+            "CounterMode",
+            "CounterStartTrigger",
+            "EnemyPhaseActionRule",
+            "Target",
+        ]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"❌ MonsterSkill missing column: {col}")
 
-            sk = MonsterSkillDef(
-                skill_id=skill_id,
-                monster_id=mid,
-                skill_type=to_str(row.get("SkillType"), "Attack"),
-                value=to_float(row.get("Value"), 0.0),
-                counter_max=to_int(row.get("CounterMax"), 0),
-                reload_timing=to_str(row.get("ReloadTiming"), "AfterEnemyAttackPhase"),
-                counter_mode=to_str(row.get("CounterMode"), "Enabled"),
-                counter_start_trigger=to_str(row.get("CounterStartTrigger"), "OnPlayerPlayCard"),
-                enemy_phase_action_rule=to_str(row.get("EnemyPhaseActionRule"), "ActIfNotActedThisTurn"),
-                target=to_str(row.get("Target"), "Player"),
+        out: List[MonsterSkill] = []
+        for _, row in df.iterrows():
+            sid = str(row["SkillId"]).strip()
+            mid = str(row["MonsterId"]).strip()
+
+            stype = parse_enum(MonsterSkillType, row.get("SkillType", ""), MonsterSkillType.Attack)
+            value = float(row["Value"]) if not pd.isna(row["Value"]) else 0.0
+
+            cmax = int(row["CounterMax"]) if not pd.isna(row["CounterMax"]) else 0
+            reload_timing = parse_enum(
+                ReloadTiming, row.get("ReloadTiming", ""), ReloadTiming.AfterEnemyAttackPhase
             )
-            skills_by_id.setdefault(mid, []).append(sk)
-
-        # Sort skills for stability (by skill_id)
-        for mid in list(skills_by_id.keys()):
-            skills_by_id[mid] = sorted(skills_by_id[mid], key=lambda s: s.skill_id)
-
-        # Build MonsterDef from index
-        self._monsters_by_id.clear()
-        for _, row in idx_df.iterrows():
-            mid = clean_id(row.get("MonsterId"))
-            if not mid:
-                continue
-            base = base_by_id.get(mid)
-            if base is None:
-                raise ValueError(f"❌ MonsterBaseStat missing for MonsterId={mid}")
-
-            m = MonsterDef(
-                monster_id=mid,
-                monster_rank=to_str(row.get("MonsterRank"), "Normal"),
-                monster_weight=to_int(row.get("MonsterWeight"), 1),
-                base_stat=base,
-                skills=skills_by_id.get(mid, []),
+            counter_mode = parse_enum(CounterMode, row.get("CounterMode", ""), CounterMode.Enabled)
+            start_trigger = parse_enum(
+                CounterStartTrigger,
+                row.get("CounterStartTrigger", ""),
+                CounterStartTrigger.OnPlayerPlayCard,
             )
-            self._monsters_by_id[mid] = m
+            enemy_rule = parse_enum(
+                EnemyPhaseActionRule,
+                row.get("EnemyPhaseActionRule", ""),
+                EnemyPhaseActionRule.ActIfNotActedThisTurn,
+            )
+            target = parse_enum(TargetType, row.get("Target", ""), TargetType.Player)
 
-    def get_monster(self, monster_id: str) -> Optional[MonsterDef]:
-        return self._monsters_by_id.get(monster_id)
+            out.append(
+                MonsterSkill(
+                    skill_id=sid,
+                    monster_id=mid,
+                    skill_type=stype,
+                    value=value,
+                    counter_max=cmax,
+                    reload_timing=reload_timing,
+                    counter_mode=counter_mode,
+                    counter_start_trigger=start_trigger,
+                    enemy_phase_action_rule=enemy_rule,
+                    target=target,
+                )
+            )
+        return out
 
-    def get_all_monsters(self) -> List[MonsterDef]:
-        return list(self._monsters_by_id.values())
+    # -----------------------------------------------------
+    # Internal: Logging
+    # -----------------------------------------------------
+
+    def _log_info(self, msg: str) -> None:
+        if self.log_level in (LogLevel.INFO, LogLevel.DEBUG, LogLevel.TRACE):
+            print(msg)

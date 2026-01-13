@@ -1,168 +1,220 @@
-"""
-card_repository.py
-Phase: Static Card Data (Repository)
+# card_repository.py
+from __future__ import annotations
 
-Responsibility:
-- Load Card.xlsx sheets: Card / CardEffect
-- Build in-memory CardDef objects (Card + ordered effects)
-- Provide query APIs for calculator / main
-
-Notes:
-- FlatValue supports None / empty / "None" -> treated as 0.0
-"""
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-from models import CardDef, CardEffectDef
 
-# =========================================================
-# Path & Loader
-# =========================================================
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "Data"
-
-
-def load_sheet(excel_name: str, sheet_name: str) -> pd.DataFrame:
-    path = DATA_DIR / excel_name
-    if not path.exists():
-        raise FileNotFoundError(f"❌ Excel file not found: {path}")
-    df = pd.read_excel(path, sheet_name=sheet_name)
-    df.columns = df.columns.astype(str).str.strip()
-    return df
+from models import (
+    AfterPlayMove,
+    Card,
+    CardEffect,
+    CardLifecycle,
+    EffectType,
+    LogLevel,
+    OnEndTurnAction,
+    ScaleStat,
+    TargetType,
+    parse_enum,
+)
 
 
-# =========================================================
-# Utils (keep same style as Phase1)
-# =========================================================
-def clean_id(x: Any) -> str:
-    if x is None:
-        return ""
-    try:
-        if pd.isna(x):
-            return ""
-    except Exception:
-        pass
-    s = str(x).replace("\u00A0", "").replace("\u200b", "").strip()
-    if s.lower() in ("nan", "none", ""):
-        return ""
-    return s
-
-
-def to_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(float(x))
-    except Exception:
-        return default
-
-
-def to_float(x: Any, default: float = 0.0) -> float:
-    # supports "None" / "" / NaN -> default
-    if x is None:
-        return default
-    s = str(x).strip()
-    if s == "" or s.lower() in ("none", "nan"):
-        return default
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-def to_str(x: Any, default: str = "") -> str:
-    s = clean_id(x)
-    return s if s else default
-
-
-# =========================================================
-# Repository
-# =========================================================
+@dataclass
 class CardRepository:
     """
-    Loads Card.xlsx and provides read APIs.
-
-    Expected sheets:
-    - Card: CardId, CharacterId, GroupId, EpiphanyTier
-    - CardEffect:
-        CardId, EffectIndex, EffectType, ScaleStat, Multiplier, FlatValue,
-        CardLifecycle, AfterPlayMove, OnEndTurnAction, Target
+    Load Card / CardEffect from Excel.
+    Supports:
+    - Party card pool: load_cards_for_characters(["Yuki","Cassius","Mika"])
+    - NEW: ApCost (int). Default to 1 if missing/blank.
     """
+    data_dir: Path
+    log_level: LogLevel = LogLevel.INFO
 
-    def __init__(self, excel_name: str = "Card.xlsx"):
-        self.excel_name = excel_name
-        self._cards_by_id: Dict[str, CardDef] = {}
-        self._cards_by_character: Dict[str, List[CardDef]] = {}
-        self._cards_by_group: Dict[str, List[CardDef]] = {}
+    _cards: Dict[str, Card] = None
+    _effects_by_card: Dict[str, List[CardEffect]] = None
 
-    def load(self) -> None:
-        card_df = load_sheet(self.excel_name, "Card")
-        effect_df = load_sheet(self.excel_name, "CardEffect")
+    def __post_init__(self) -> None:
+        self._cards = {}
+        self._effects_by_card = {}
 
-        # Parse effects grouped by CardId
-        effects_by_card: Dict[str, List[CardEffectDef]] = {}
-        for _, row in effect_df.iterrows():
-            card_id = clean_id(row.get("CardId"))
-            if not card_id:
-                continue
+    # -----------------------------------------------------
+    # Public API
+    # -----------------------------------------------------
 
-            eff = CardEffectDef(
-                card_id=card_id,
-                effect_index=to_int(row.get("EffectIndex"), 0),
-                effect_type=clean_id(row.get("EffectType")),
-                scale_stat=clean_id(row.get("ScaleStat")),
-                multiplier=to_float(row.get("Multiplier"), 1.0),
-                flat_value=to_float(row.get("FlatValue"), 0.0),
-                card_lifecycle=to_str(row.get("CardLifecycle"), "Normal"),
-                after_play_move=to_str(row.get("AfterPlayMove"), "Discard"),
-                on_end_turn_action=to_str(row.get("OnEndTurnAction"), "None"),
-                target=to_str(row.get("Target"), "EnemySingle"),
+    def load_cards_for_characters(
+        self,
+        excel_name: str,
+        sheet_card: str,
+        sheet_effect: str,
+        character_ids: List[str],
+    ) -> Tuple[List[Card], Dict[str, List[CardEffect]]]:
+        """
+        Load cards filtered by character_ids, and all their effects.
+        Returns:
+            cards(list), effects_by_card(dict)
+        """
+        card_df = self._load_sheet(excel_name, sheet_card)
+        effect_df = self._load_sheet(excel_name, sheet_effect)
+
+        cards = self._parse_cards(card_df, character_ids)
+        effects_by_card = self._parse_effects(effect_df, set(c.card_id for c in cards))
+
+        # cache
+        self._cards = {c.card_id: c for c in cards}
+        self._effects_by_card = effects_by_card
+
+        self._log_info(
+            f"[Card] Loaded {len(cards)} cards for party: {', '.join(character_ids)}"
+        )
+        return cards, effects_by_card
+
+    def get_card(self, card_id: str) -> Optional[Card]:
+        return self._cards.get(card_id)
+
+    def get_effects(self, card_id: str) -> List[CardEffect]:
+        return self._effects_by_card.get(card_id, [])
+
+    # -----------------------------------------------------
+    # Internal: Loaders
+    # -----------------------------------------------------
+
+    def _load_sheet(self, excel_name: str, sheet_name: str) -> pd.DataFrame:
+        path = self.data_dir / excel_name
+        if not path.exists():
+            raise FileNotFoundError(f"❌ Excel file not found: {path}")
+
+        try:
+            df = pd.read_excel(path, sheet_name=sheet_name)
+        except ValueError:
+            raise ValueError(f"❌ Sheet '{sheet_name}' not found in {excel_name}")
+
+        df.columns = df.columns.astype(str).str.strip()
+        return df
+
+    # -----------------------------------------------------
+    # Internal: Parsers
+    # -----------------------------------------------------
+
+    def _parse_cards(self, df: pd.DataFrame, character_ids: List[str]) -> List[Card]:
+        required = ["CardId", "CharacterId", "GroupId", "EpiphanyTier"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"❌ Card sheet missing column: {col}")
+
+        # NEW: ApCost is optional (default 1)
+        has_ap_cost = "ApCost" in df.columns
+
+        # Filter by party characters
+        df2 = df[df["CharacterId"].astype(str).isin(character_ids)].copy()
+
+        cards: List[Card] = []
+        for _, row in df2.iterrows():
+            card_id = str(row["CardId"]).strip()
+            char_id = str(row["CharacterId"]).strip()
+            group_id = str(row["GroupId"]).strip()
+            epi = int(row["EpiphanyTier"]) if not pd.isna(row["EpiphanyTier"]) else 0
+
+            ap_cost = 1
+            if has_ap_cost:
+                v = row.get("ApCost", 1)
+                if pd.isna(v):
+                    ap_cost = 1
+                else:
+                    try:
+                        ap_cost = int(v)
+                    except Exception:
+                        ap_cost = 1
+
+            cards.append(
+                Card(
+                    card_id=card_id,
+                    character_id=char_id,
+                    group_id=group_id,
+                    epiphany_tier=epi,
+                    ap_cost=ap_cost,
+                )
             )
-            effects_by_card.setdefault(card_id, []).append(eff)
 
-        # Sort effects by EffectIndex
-        for cid in list(effects_by_card.keys()):
-            effects_by_card[cid] = sorted(effects_by_card[cid], key=lambda e: e.effect_index)
+        return cards
 
-        # Build CardDef
-        self._cards_by_id.clear()
-        self._cards_by_character.clear()
-        self._cards_by_group.clear()
+    def _parse_effects(
+        self, df: pd.DataFrame, allowed_card_ids: set
+    ) -> Dict[str, List[CardEffect]]:
+        required = [
+            "CardId",
+            "EffectIndex",
+            "EffectType",
+            "ScaleStat",
+            "Multiplier",
+            "FlatValue",
+            "CardLifecycle",
+            "AfterPlayMove",
+            "OnEndTurnAction",
+            "Target",
+        ]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"❌ CardEffect sheet missing column: {col}")
 
-        for _, row in card_df.iterrows():
-            card_id = clean_id(row.get("CardId"))
-            if not card_id:
-                continue
+        effects_by_card: Dict[str, List[CardEffect]] = {}
 
-            character_id = clean_id(row.get("CharacterId"))
-            group_id = clean_id(row.get("GroupId"))
-            epiphany_tier = to_int(row.get("EpiphanyTier"), 0)
+        df2 = df[df["CardId"].astype(str).isin(allowed_card_ids)].copy()
 
-            card = CardDef(
-                card_id=card_id,
-                character_id=character_id,
-                group_id=group_id,
-                epiphany_tier=epiphany_tier,
-                effects=effects_by_card.get(card_id, []),
+        for _, row in df2.iterrows():
+            card_id = str(row["CardId"]).strip()
+            idx = int(row["EffectIndex"]) if not pd.isna(row["EffectIndex"]) else 0
+
+            effect_type = parse_enum(
+                EffectType, row.get("EffectType", ""), EffectType.Damage
+            )
+            scale_stat = parse_enum(
+                ScaleStat, row.get("ScaleStat", ""), ScaleStat.None_
             )
 
-            self._cards_by_id[card_id] = card
-            if character_id:
-                self._cards_by_character.setdefault(character_id, []).append(card)
-            if group_id:
-                self._cards_by_group.setdefault(group_id, []).append(card)
+            mult = row.get("Multiplier", 0.0)
+            flat = row.get("FlatValue", 0.0)
 
-        # Optional: stable ordering
-        for k in list(self._cards_by_character.keys()):
-            self._cards_by_character[k] = sorted(self._cards_by_character[k], key=lambda c: c.card_id)
-        for k in list(self._cards_by_group.keys()):
-            self._cards_by_group[k] = sorted(self._cards_by_group[k], key=lambda c: (c.epiphany_tier, c.card_id))
+            multiplier = float(mult) if not pd.isna(mult) else 0.0
+            flat_value = float(flat) if not pd.isna(flat) else 0.0
 
-    # ---------- Query APIs ----------
-    def get_card(self, card_id: str) -> Optional[CardDef]:
-        return self._cards_by_id.get(card_id)
+            lifecycle = parse_enum(
+                CardLifecycle, row.get("CardLifecycle", ""), CardLifecycle.Normal
+            )
+            after_play = parse_enum(
+                AfterPlayMove, row.get("AfterPlayMove", ""), AfterPlayMove.Discard
+            )
+            on_end = parse_enum(
+                OnEndTurnAction, row.get("OnEndTurnAction", ""), OnEndTurnAction.None_
+            )
+            target = parse_enum(TargetType, row.get("Target", ""), TargetType.EnemySingle)
 
-    def get_cards_by_character(self, character_id: str) -> List[CardDef]:
-        return list(self._cards_by_character.get(character_id, []))
+            effects_by_card.setdefault(card_id, []).append(
+                CardEffect(
+                    card_id=card_id,
+                    effect_index=idx,
+                    effect_type=effect_type,
+                    scale_stat=scale_stat,
+                    multiplier=multiplier,
+                    flat_value=flat_value,
+                    card_lifecycle=lifecycle,
+                    after_play_move=after_play,
+                    on_end_turn_action=on_end,
+                    target=target,
+                )
+            )
 
-    def get_cards_in_group(self, group_id: str) -> List[CardDef]:
-        return list(self._cards_by_group.get(group_id, []))
+        # Ensure ordering by EffectIndex
+        for cid in effects_by_card:
+            effects_by_card[cid].sort(key=lambda e: e.effect_index)
+
+        return effects_by_card
+
+    # -----------------------------------------------------
+    # Internal: Logging
+    # -----------------------------------------------------
+
+    def _log_info(self, msg: str) -> None:
+        if self.log_level in (LogLevel.INFO, LogLevel.DEBUG, LogLevel.TRACE):
+            print(msg)

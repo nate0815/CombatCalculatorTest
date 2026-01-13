@@ -1,34 +1,9 @@
-from dataclasses import dataclass
-from typing import Optional, List, Dict
+# models.py
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from enum import Enum
-
-
-# =========================================================
-# Phase 1 Output
-# Character Static Snapshot
-# =========================================================
-
-@dataclass(frozen=True)
-class CharacterSnapshot:
-    """
-    Result of Phase 1: Character Static Calculation
-
-    This object represents a 'frozen' view of a character's
-    final base stats after applying level, equipment, potential,
-    affection, etc.
-
-    Phase 2 (Card Calculation) should ONLY depend on this object,
-    and must NOT know how these values were calculated.
-    """
-    character_id: str
-    final_atk: float
-    final_def: float
-    final_hp: float
-
-    # Optional metadata (not used in calculation, for debugging / trace)
-    level: Optional[float] = None
-    potential_tier: Optional[int] = None
-    affection_level: Optional[int] = None
+from typing import Dict, List, Optional
 
 
 # =========================================================
@@ -49,115 +24,186 @@ class TargetType(str, Enum):
     AllySingle = "AllySingle"
     AllyAll = "AllyAll"
 
-    # Monster side (you already use these)
+    # Monster side (current MVP)
     Player = "Player"
 
 
+class EffectType(str, Enum):
+    Damage = "Damage"
+    Shield = "Shield"
+    Heal = "Heal"
+    Buff = "Buff"
+    Debuff = "Debuff"
+
+
+class ScaleStat(str, Enum):
+    ATK = "ATK"
+    DEF = "DEF"
+    HP = "HP"
+    None_ = "None"   # use None_ to avoid python keyword conflicts
+
+
+class CardLifecycle(str, Enum):
+    Normal = "Normal"
+    Exhaust = "Exhaust"
+    Ethereal = "Ethereal"
+
+
+class AfterPlayMove(str, Enum):
+    None_ = "None"
+    Discard = "Discard"
+    Remove = "Remove"
+
+
+class OnEndTurnAction(str, Enum):
+    None_ = "None"
+    Remove = "Remove"
+
+
+# ---- Monster skill system (MVP) ----
+
+class MonsterSkillType(str, Enum):
+    Attack = "Attack"
+    AddShield = "AddShield"
+    Buff = "Buff"
+    Debuff = "Debuff"
+
+
+class ReloadTiming(str, Enum):
+    # You have unified to this in sheet
+    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"
+
+
 class CounterMode(str, Enum):
-    Enabled = "Enabled"
     Disabled = "Disabled"
+    Enabled = "Enabled"
     Conditional = "Conditional"
 
 
 class CounterStartTrigger(str, Enum):
-    None_ = "None"
+    # Your updated requirement: any card played (even non-attack) reduces counter
     OnPlayerPlayCard = "OnPlayerPlayCard"
-    OnDamaged = "OnDamaged"
-    OnBattleStart = "OnBattleStart"
+
+    # (reserved / future)
+    OnPlayerAttackCard = "OnPlayerAttackCard"
+    OnPlayerTurnStart = "OnPlayerTurnStart"
 
 
 class EnemyPhaseActionRule(str, Enum):
     None_ = "None"
-    ActIfNotActedThisTurn = "ActIfNotActedThisTurn"
     ActOnce = "ActOnce"
-
-
-class ReloadTiming(str, Enum):
-    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"
-    Immediate = "Immediate"
+    ActIfNotActedThisTurn = "ActIfNotActedThisTurn"
 
 
 # =========================================================
-# Phase 2 Data Models
-# Card Definitions (loaded from Excel)
+# Phase 1 Output (Character Snapshot)
 # =========================================================
 
-@dataclass(frozen=True)
-class CardEffectDef:
+@dataclass
+class CharacterSnapshot:
     """
-    One effect row in CardEffect sheet.
-
-    MVP supports:
-    - EffectType: Damage / Shield / Heal
-    - ScaleStat: ATK / DEF / HP
-    - Multiplier: float (1.0 = 100%)
-    - FlatValue: optional (None/blank -> treated as 0.0 in parser)
-
-    Extra columns (for battle simulation MVP):
-    - CardLifecycle: Normal / Exhaust / Ethereal (optional)
-    - AfterPlayMove: Discard / None / Remove (optional)
-    - OnEndTurnAction: None / Remove (optional)
-    - Target: EnemySingle / EnemyAll / Self ...
+    Result of Phase 1: Character Static Calculation
+    This is a frozen view of a character final base stats (ATK/DEF/HP).
     """
-    card_id: str
-    effect_index: int
-    effect_type: str
-    scale_stat: str
-    multiplier: float
-    flat_value: float
+    character_id: str
+    final_atk: float
+    final_def: float
+    final_hp: float
 
-    card_lifecycle: str = "Normal"
-    after_play_move: str = "Discard"
-    on_end_turn_action: str = "None"
-    target: str = "EnemySingle"
+    # Optional metadata
+    level: Optional[float] = None
+    affection_level: Optional[int] = None
 
 
-@dataclass(frozen=True)
-class CardDef:
-    """Card basic info + ordered effects. Loaded by repository; consumed by calculators."""
+# =========================================================
+# Player Party (MVP: shared HP bar)
+# =========================================================
+
+@dataclass
+class PlayerPartySnapshot:
+    """
+    MVP rule:
+    - Team HP is shared (single HP bar) = sum of members' HP.
+    - Damage taken reduces team_hp.
+    - Shield is team-wide (single shield pool).
+    - ATK/DEF used for card scaling comes from active_character.
+    """
+    members: List[CharacterSnapshot]
+    active_character_id: str
+
+    team_hp_max: float = 0.0
+    team_hp: float = 0.0
+    team_shield: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.members:
+            raise ValueError("PlayerPartySnapshot.members cannot be empty")
+
+        self.team_hp_max = float(sum(m.final_hp for m in self.members))
+        self.team_hp = float(self.team_hp_max)
+
+        if not any(m.character_id == self.active_character_id for m in self.members):
+            # fallback to first member
+            self.active_character_id = self.members[0].character_id
+
+    def get_active_member(self) -> CharacterSnapshot:
+        for m in self.members:
+            if m.character_id == self.active_character_id:
+                return m
+        return self.members[0]
+
+
+# =========================================================
+# Card Data (MVP)
+# =========================================================
+
+@dataclass
+class Card:
     card_id: str
     character_id: str
     group_id: str
-    epiphany_tier: int
-    effects: List[CardEffectDef]
+    epiphany_tier: int = 0
+
+    # NEW: AP cost
+    ap_cost: int = 1
 
 
-# =========================================================
-# Phase 2 Output Models
-# Card Calculation Results (derived data)
-# =========================================================
-
-@dataclass(frozen=True)
-class CardEffectResult:
-    effect_index: int
-    effect_type: str
-    scale_stat: str
-    base_stat: float
-    multiplier: float
-    flat_value: float
-    value: float
-
-    # pass-through (debug / battle usage)
-    card_lifecycle: str
-    after_play_move: str
-    on_end_turn_action: str
-    target: str
-
-
-@dataclass(frozen=True)
-class CardResult:
+@dataclass
+class CardEffect:
     card_id: str
-    character_id: str
-    epiphany_tier: int
-    effects: List[CardEffectResult]
-    totals: Dict[str, float]  # e.g. {"Damage": x, "Heal": y, "Shield": z}
+    effect_index: int
+
+    effect_type: EffectType
+    scale_stat: ScaleStat
+
+    multiplier: float = 0.0
+    flat_value: float = 0.0
+
+    card_lifecycle: CardLifecycle = CardLifecycle.Normal
+    after_play_move: AfterPlayMove = AfterPlayMove.Discard
+    on_end_turn_action: OnEndTurnAction = OnEndTurnAction.None_
+
+    target: TargetType = TargetType.EnemySingle
+
+    # reserved / future
+    duration_turn: int = 0
+    stackable: bool = False
+    max_stack: int = 0
+    condition: Optional[str] = None
 
 
 # =========================================================
-# Monster Data Models (loaded from Excel)
+# Monster Data (MVP)
 # =========================================================
 
-@dataclass(frozen=True)
+@dataclass
+class MonsterIndex:
+    monster_id: str
+    monster_rank: str
+    monster_weight: int = 1
+
+
+@dataclass
 class MonsterBaseStat:
     monster_id: str
     level: int
@@ -166,71 +212,68 @@ class MonsterBaseStat:
     health: float
 
 
-@dataclass(frozen=True)
-class MonsterSkillDef:
+@dataclass
+class MonsterSkill:
     skill_id: str
     monster_id: str
-    skill_type: str   # Attack / AddShield / Buff / Debuff (MVP uses Attack/AddShield)
+    skill_type: MonsterSkillType
+
     value: float
 
     counter_max: int
-    reload_timing: str
-    counter_mode: str
-    counter_start_trigger: str
-    enemy_phase_action_rule: str
-    target: str
+    reload_timing: ReloadTiming
 
+    counter_mode: CounterMode
+    counter_start_trigger: CounterStartTrigger
+    enemy_phase_action_rule: EnemyPhaseActionRule
 
-@dataclass(frozen=True)
-class MonsterDef:
-    monster_id: str
-    monster_rank: str
-    monster_weight: int
-    base_stat: MonsterBaseStat
-    skills: List[MonsterSkillDef]
+    target: TargetType
 
 
 # =========================================================
-# Battle Runtime Models (MVP)
+# Runtime State (MVP)
 # =========================================================
-
-@dataclass
-class PlayerState:
-    character_id: str
-    max_hp: float
-    hp: float
-    atk: float
-    defense: float
-    shield: float = 0.0
-
 
 @dataclass
 class MonsterState:
     monster_id: str
-    max_hp: float
+
     hp: float
-    atk: float
-    defense: float
     shield: float = 0.0
 
     counter: int = 0
     counter_max: int = 0
+
+    # for EnemyPhaseActionRule = ActIfNotActedThisTurn
     has_acted_this_turn: bool = False
 
-    # A monster can have multiple skills; MVP uses a simple "active skill index"
-    active_skill_index: int = 0
 
-
-@dataclass(frozen=True)
-class BattleConfig:
-    log_level: LogLevel = LogLevel.INFO
-    max_turns: int = 999  # safety guard
-
-
-@dataclass(frozen=True)
+@dataclass
 class BattleResult:
     battle_index: int
-    turns: int
     winner: str  # "Player" or "Enemy"
+    turns: int
     player_hp_end: float
     enemies_alive: int
+
+
+# =========================================================
+# Utility: simple enum parsing helper
+# =========================================================
+
+def parse_enum(enum_cls: Enum, value: str, default):
+    """
+    Safe enum parse for sheet strings.
+    - enum_cls: Enum class
+    - value: sheet string
+    - default: default enum value if parsing fails
+    """
+    if value is None:
+        return default
+    v = str(value).strip()
+    if v == "":
+        return default
+    try:
+        return enum_cls(v)
+    except Exception:
+        return default
