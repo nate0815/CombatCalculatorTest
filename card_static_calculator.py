@@ -1,7 +1,7 @@
 """
 card_static_calculator.py
-
 Phase: Static Card Calculation (Phase 2 MVP)
+
 Responsibility:
 - Take Phase1 CharacterSnapshot (final ATK/DEF/HP)
 - Apply CardDef (ordered effects) to compute card outputs
@@ -12,7 +12,6 @@ MVP supports EffectType:
 """
 
 from typing import Dict, List
-
 from models import (
     CharacterSnapshot,
     CardDef,
@@ -21,11 +20,9 @@ from models import (
     CardResult,
 )
 
-
 # =========================================================
 # Utils
 # =========================================================
-
 def debug_print(verbose: bool, *args, **kwargs):
     if verbose:
         print(*args, **kwargs)
@@ -49,7 +46,6 @@ def _norm_effect_type(effect_type: str) -> str:
 # =========================================================
 # Core Calculation
 # =========================================================
-
 def calc_effect(snapshot: CharacterSnapshot, eff: CardEffectDef) -> CardEffectResult:
     base = _get_base_stat(snapshot, eff.scale_stat)
     mult = float(eff.multiplier)
@@ -64,6 +60,10 @@ def calc_effect(snapshot: CharacterSnapshot, eff: CardEffectDef) -> CardEffectRe
         multiplier=mult,
         flat_value=flat,
         value=value,
+        card_lifecycle=eff.card_lifecycle,
+        after_play_move=eff.after_play_move,
+        on_end_turn_action=eff.on_end_turn_action,
+        target=eff.target,
     )
 
 
@@ -89,13 +89,13 @@ def calc_card(snapshot: CharacterSnapshot, card: CardDef, verbose: bool = False)
 
             debug_print(
                 verbose,
-                f"  [{r.effect_index}] {r.effect_type} scale={r.scale_stat} "
-                f"base={r.base_stat} mult={r.multiplier} flat={r.flat_value} => {r.value}"
+                f" [{r.effect_index}] {r.effect_type} target={r.target} scale={r.scale_stat} "
+                f"base={r.base_stat} mult={r.multiplier} flat={r.flat_value} => {r.value}",
             )
 
     debug_print(
         verbose,
-        f"Totals: Damage={totals.get('Damage', 0.0)}, Heal={totals.get('Heal', 0.0)}, Shield={totals.get('Shield', 0.0)}"
+        f"Totals: Damage={totals.get('Damage', 0.0)}, Heal={totals.get('Heal', 0.0)}, Shield={totals.get('Shield', 0.0)}",
     )
 
     return CardResult(

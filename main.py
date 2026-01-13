@@ -1,82 +1,134 @@
 # main.py
-# Orchestrator / Pipeline Runner
+# Orchestrator / Pipeline Runner + Battle Simulator CLI
 
 import pandas as pd
-from combat_static_calculator import calc_all_character_snapshots
 
+from combat_static_calculator import calc_all_character_snapshots
 from card_repository import CardRepository
-from card_static_calculator import calc_card
+from monster_repository import MonsterRepository
+from battle_simulator import BattleSimulator
+from models import BattleConfig, LogLevel
+
+
+def prompt_positive_int(prompt: str) -> int:
+    while True:
+        s = input(prompt).strip()
+        try:
+            v = int(s)
+            if v <= 0:
+                print("請輸入正整數。")
+                continue
+            return v
+        except Exception:
+            print("輸入格式錯誤，請輸入正整數。")
+
+
+def prompt_confirm_y(prompt: str = "是否確定開始？ (Y/N)\n> ") -> bool:
+    s = input(prompt).strip().upper()
+    return s == "Y"
 
 
 def main():
-    print("=== Combat Calculator Pipeline ===")
+    print("=== Battle Simulator (MVP) ===")
+
+    battle_count = prompt_positive_int("請輸入要模擬的戰鬥次數（正整數）：\n> ")
+    print(f"\n你即將模擬 {battle_count} 場戰鬥。")
+    print("每一場戰鬥會在『我方或敵方全滅』時結束。")
+
+    if not prompt_confirm_y("是否確定開始模擬？ (Y/N)\n> "):
+        print("已取消模擬。")
+        input("按 Enter 鍵結束程式...")
+        return
 
     # -----------------------------
-    # Phase 1 (quiet)
+    # Phase 1: player snapshot
     # -----------------------------
     snapshots = calc_all_character_snapshots(verbose=False)
-
-    print("\n=== Phase 1 Result ===")
     if not snapshots:
-        print("(no snapshots)")
-    else:
-        df = pd.DataFrame([{
-            "CharacterId": s.character_id,
-            "Level": s.level,
-            "ATK": round(s.final_atk, 2),
-            "DEF": round(s.final_def, 2),
-            "HP": round(s.final_hp, 2),
-        } for s in snapshots])
-        print(df.to_string(index=False))
+        print("❌ Phase 1: no snapshots. Check CombatInputPanel.xlsx")
+        input("按 Enter 鍵結束程式...")
+        return
+
+    # MVP: pick the first character as player
+    player_snap = snapshots[0]
+    print(f"\n[Player] Use CharacterSnapshot: {player_snap.character_id} ATK={player_snap.final_atk} DEF={player_snap.final_def} HP={player_snap.final_hp}")
 
     # -----------------------------
-    # Phase 2 (Card Static Calc)
+    # Load cards
     # -----------------------------
-    print("\n=== Phase 2: Card Static Result ===")
-
     try:
-        repo = CardRepository("Card.xlsx")
-        repo.load()
+        card_repo = CardRepository("Card.xlsx")
+        card_repo.load()
     except Exception as e:
         print(f"❌ Failed to load Card.xlsx: {e}")
-        print("\nPipeline done.")
         input("按 Enter 鍵結束程式...")
         return
 
-    if not snapshots:
-        print("(skip phase 2: no snapshots)")
-        print("\nPipeline done.")
+    player_cards = card_repo.get_cards_by_character(player_snap.character_id)
+    if not player_cards:
+        print(f"❌ No cards found for character: {player_snap.character_id}")
         input("按 Enter 鍵結束程式...")
         return
 
-    card_rows = []
-    for s in snapshots:
-        cards = repo.get_cards_by_character(s.character_id)
-        if not cards:
-            print(f"⚠️ No cards found for character: {s.character_id}")
-            continue
+    print(f"[Card] Loaded {len(player_cards)} cards for {player_snap.character_id}")
 
-        for c in cards:
-            r = calc_card(s, c, verbose=False)
+    # -----------------------------
+    # Load monsters
+    # -----------------------------
+    try:
+        monster_repo = MonsterRepository("Monster.xlsx")
+        monster_repo.load()
+    except Exception as e:
+        print(f"❌ Failed to load Monster.xlsx: {e}")
+        input("按 Enter 鍵結束程式...")
+        return
 
-            card_rows.append({
-                "CharacterId": s.character_id,
-                "CardId": r.card_id,
-                "Tier": r.epiphany_tier,
-                "DamageTotal": round(r.totals.get("Damage", 0.0), 2),
-                "HealTotal": round(r.totals.get("Heal", 0.0), 2),
-                "ShieldTotal": round(r.totals.get("Shield", 0.0), 2),
-            })
+    monsters = monster_repo.get_all_monsters()
+    if not monsters:
+        print("❌ No monsters found.")
+        input("按 Enter 鍵結束程式...")
+        return
 
-    print("\n=== Phase 2 Summary ===")
-    if not card_rows:
-        print("(no card results)")
-    else:
-        df2 = pd.DataFrame(card_rows).sort_values(by=["CharacterId", "CardId"]).reset_index(drop=True)
-        print(df2.to_string(index=False))
+    print(f"[Monster] Loaded {len(monsters)} monsters: " + ", ".join([m.monster_id for m in monsters]))
 
-    print("\nPipeline done.")
-    input("按 Enter 鍵結束程式...")
+    # -----------------------------
+    # Run Simulation
+    # -----------------------------
+    config = BattleConfig(log_level=LogLevel.INFO, max_turns=999)
+    sim = BattleSimulator(config)
+
+    results = sim.run_many(
+        battle_count=battle_count,
+        player_snapshot=player_snap,
+        player_cards=player_cards,
+        monsters=monsters,
+    )
+
+    # -----------------------------
+    # Summary
+    # -----------------------------
+    print("\n=== Simulation Summary ===")
+    df = pd.DataFrame(
+        [
+            {
+                "Battle": r.battle_index,
+                "Winner": r.winner,
+                "Turns": r.turns,
+                "PlayerHP_End": round(r.player_hp_end, 1),
+                "EnemiesAlive": r.enemies_alive,
+            }
+            for r in results
+        ]
+    )
+
+    print(df.to_string(index=False))
+
+    # Simple aggregate
+    win_player = sum(1 for r in results if r.winner == "Player")
+    win_enemy = sum(1 for r in results if r.winner == "Enemy")
+    print(f"\nPlayer Wins: {win_player}/{len(results)} | Enemy Wins: {win_enemy}/{len(results)}")
+
+    input("\n按 Enter 鍵結束程式...")
 
 
 if __name__ == "__main__":
