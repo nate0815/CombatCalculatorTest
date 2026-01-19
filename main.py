@@ -206,6 +206,17 @@ def main() -> None:
         monster_base_stats=monster_base_stats,
         monster_skills=monster_skills,
     )
+# -------------------------
+# 6.5) 將每場 BattleResult 寫入 Summary
+# -------------------------
+    for r in results:
+        reporter.add_summary(
+            battle_index=r.battle_index,
+            winner=r.winner,
+            turns=r.turns,
+            player_hp_end=r.player_hp_end,
+            enemies_alive=r.enemies_alive,
+        )
 
     # -------------------------
     # 7) 在控制台輸出簡易統計結果
