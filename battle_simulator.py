@@ -61,12 +61,21 @@ def clamp(v: float, lo: float, hi: float) -> float:
 def apply_damage(hp: float, shield: float, dmg: float) -> Tuple[float, float]:
     """Damage consumes shield first, then hp."""
     if dmg <= 0:
-        return hp, shield
+        # 防呆：即使沒有傷害，也確保不會回傳負值
+        return max(0.0, hp), max(0.0, shield)
+
     remaining = dmg
     if shield > 0:
         used = min(shield, remaining)
         shield -= used
         remaining -= used
+
+    if remaining > 0:
+        hp -= remaining
+
+    # 防呆：避免出現 hp / shield < 0，讓 log / 報表更乾淨
+    return max(0.0, hp), max(0.0, shield)
+    remaining -= used
     if remaining > 0:
         hp -= remaining
     return hp, shield
