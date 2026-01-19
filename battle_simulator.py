@@ -32,8 +32,8 @@ class BattleConfig:
     max_turns: int = 999
     log_level: LogLevel = LogLevel.INFO
 
-    # If True: when next card cost > AP, stop player phase.
-    # If False: will skip cards until find one affordable (MVP can stay True).
+    # 若為 True: 當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段。
+    # 若為 False: 跳過該卡牌直到找到可負擔的卡牌 (MVP 預設保持 True)。
     stop_when_insufficient_ap: bool = True
 
 
@@ -85,14 +85,14 @@ def pick_enemy_single(
 
 class BattleSimulator:
     """
-    MVP Battle Flow with:
-    - Party shared HP bar (PlayerPartySnapshot.team_hp / team_hp_max)
-    - AP system (ap_max=3), each Card has ap_cost
-    - Counter tick trigger: OnPlayerPlayCard (any card)
-    - Reaction: if counter reaches 0 during PlayerPhase and monster hasn't acted => act immediately once
-    - EnemyPhaseActionRule=ActIfNotActedThisTurn: if not acted and counter>0 => act once in EnemyPhase
-    - ReloadTiming=AfterEnemyAttackPhase: after monster acts in this turn, reload counter to counter_max at end of EnemyPhase
-    - Detailed logs recorded into BattleReporter EventLog; console prints flow as well
+    MVP 戰鬥流程包含:
+    - 隊伍共用血條 (PlayerPartySnapshot.team_hp / team_hp_max)
+    - AP 系統 (最大 AP=3)，每張卡牌有 AP 消耗
+    - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
+    - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
+    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且計數器 > 0 => 在敵方階段行動一次
+    - 重置時機 (AfterEnemyAttackPhase): 怪物本回合行動後，於敵方階段結束時重置計數器
+    - 詳細日誌記錄於 BattleReporter EventLog；控制台也會印出流程
     """
 
     def __init__(self, config: BattleConfig, reporter: BattleReporter) -> None:
@@ -139,17 +139,19 @@ class BattleSimulator:
     ) -> BattleResult:
         # --------------------------
         # Init party runtime state
+        # 初始化隊伍執行時狀態
         # --------------------------
         party_runtime = PlayerPartySnapshot(
             members=party.members,
             active_character_id=party.active_character_id,
         )
-        party_runtime.team_shield = 0.0  # reset
+        party_runtime.team_shield = 0.0  # 重置護盾
 
         active_member = party_runtime.get_active_member()
 
         # --------------------------
         # Build monsters runtime
+        # 建立怪物執行時狀態
         # --------------------------
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for sk in monster_skills:
@@ -163,7 +165,7 @@ class BattleSimulator:
             if base is None:
                 raise ValueError(f"❌ Missing MonsterBaseStat for MonsterId={mi.monster_id}")
 
-            # pick first skill as active skill (MVP)
+            # MVP: 選取第一個技能作為主要技能
             sk_list = skills_by_monster.get(mi.monster_id, [])
             counter_max = sk_list[0].counter_max if sk_list else 0
 
@@ -179,6 +181,7 @@ class BattleSimulator:
 
         # --------------------------
         # Init logs
+        # 初始化日誌
         # --------------------------
         self._print_and_record_system(
             battle_index, 0, "System", "BattleStart",
@@ -199,13 +202,13 @@ class BattleSimulator:
         if not party_cards:
             raise ValueError("❌ No cards for party. Check Card sheet CharacterId filters.")
 
-        # deterministic cycle order (stable by card_id)
+        # 決定性的發牌順序 (依 card_id 排序，確保每次模擬一致)
         card_order = sorted(party_cards, key=lambda c: (c.character_id, c.card_id))
         card_cursor = 0
 
         turn = 1
         while turn <= self.config.max_turns:
-            # reset acted flag each turn
+            # 每回合開始時，重置怪物的「已行動」標記
             for _, _, mst in monsters:
                 mst.has_acted_this_turn = False
 
@@ -218,6 +221,7 @@ class BattleSimulator:
 
             # ==========================
             # Player Phase (AP driven)
+            # 玩家階段 (AP 驅動)
             # ==========================
             self._print_and_record_system(
                 battle_index, turn, "Player", "PhaseStart",
@@ -261,7 +265,7 @@ class BattleSimulator:
                     player_shield_before=party_runtime.team_shield,
                 )
 
-                # apply card effects (ordered)
+                # 依序套用卡牌效果
                 effects = card_effects_by_id.get(card.card_id, [])
                 for eff in effects:
                     self._apply_card_effect(
@@ -277,7 +281,7 @@ class BattleSimulator:
                         winner = self._get_winner(party_runtime, monsters)
                         return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
 
-                # tick counter ONCE per card play (any card)
+                # 每打出一張卡牌 (任意卡牌)，觸發一次計數器檢查
                 self._tick_counters_on_player_play_card(
                     battle_index=battle_index,
                     turn=turn,
@@ -300,13 +304,14 @@ class BattleSimulator:
 
             # ==========================
             # Enemy Phase (fallback)
+            # 敵方階段 (補行動)
             # ==========================
             self._print_and_record_system(
                 battle_index, turn, "EnemyPhase", "PhaseStart",
                 f"[Battle {battle_index}][T{turn:02d}][EnemyPhase] Start",
             )
 
-            # fallback actions for monsters that haven't acted and counter > 0
+            # 針對尚未行動且計數器 > 0 的怪物執行補救行動 (Fallback Action)
             for mi, _, mst in monsters:
                 if mst.hp <= 0:
                     continue
@@ -340,7 +345,7 @@ class BattleSimulator:
                             winner = self._get_winner(party_runtime, monsters)
                             return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
 
-            # reload after enemy attack phase (MVP: reload any monster that acted this turn)
+            # 敵方攻擊階段結束後重置計數器 (MVP: 重置本回合有行動的怪物)
             for mi, _, mst in monsters:
                 if mst.hp <= 0:
                     continue
@@ -373,7 +378,7 @@ class BattleSimulator:
 
             turn += 1
 
-        # Safety end
+        # 超過最大回合數，強制結束
         winner = "Unknown"
         return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
 
@@ -386,7 +391,7 @@ class BattleSimulator:
         if stat == ScaleStat.DEF:
             return float(active_member.final_def)
         if stat == ScaleStat.HP:
-            # MVP: use team hp max for shared bar system
+            # MVP: 共用血條系統使用隊伍最大血量
             return float(party.team_hp_max)
         return 0.0
 
@@ -404,6 +409,7 @@ class BattleSimulator:
         value = base * float(eff.multiplier) + float(eff.flat_value)
 
         if eff.effect_type == EffectType.Damage:
+            # 傷害效果: 優先扣除護盾，再扣除血量
             if eff.target == TargetType.EnemyAll:
                 for mi, _, mst in monsters:
                     if mst.hp <= 0:
@@ -449,6 +455,7 @@ class BattleSimulator:
                 )
 
         elif eff.effect_type == EffectType.Shield:
+            # 護盾效果: 增加隊伍共用護盾
             sh_b = party.team_shield
             party.team_shield += float(value)
             msg = f"[Battle {battle_index}][T{turn:02d}][CardShield] +{value:.1f} (Shield {sh_b:.1f}->{party.team_shield:.1f})"
@@ -465,6 +472,7 @@ class BattleSimulator:
             )
 
         elif eff.effect_type == EffectType.Heal:
+            # 治療效果: 恢復隊伍血量，不超過上限
             hp_b = party.team_hp
             party.team_hp = clamp(party.team_hp + float(value), 0.0, party.team_hp_max)
             msg = f"[Battle {battle_index}][T{turn:02d}][CardHeal] +{value:.1f} (HP {hp_b:.1f}->{party.team_hp:.1f})"
@@ -499,7 +507,7 @@ class BattleSimulator:
                 continue
             skill = sk_list[0]
 
-            # MVP supports Enabled + OnPlayerPlayCard
+            # MVP 支援: 啟用狀態 + 玩家打出卡牌時觸發
             if skill.counter_mode != CounterMode.Enabled:
                 continue
             if skill.counter_start_trigger != CounterStartTrigger.OnPlayerPlayCard:
@@ -517,7 +525,7 @@ class BattleSimulator:
                 counter_after=mst.counter,
             )
 
-            # Reaction: counter reaches 0 during player phase and not acted yet
+            # 反應機制: 若在玩家階段計數器歸零，且本回合尚未行動，則立即反擊
             if mst.counter == 0 and (not mst.has_acted_this_turn):
                 msg2 = f"[Battle {battle_index}][T{turn:02d}][Reaction] {mi.monster_id} counter==0 => retaliate now"
                 self._print_and_record(
@@ -600,7 +608,7 @@ class BattleSimulator:
             monster_state.has_acted_this_turn = True
 
         else:
-            # Unsupported skills treated as acted (so it won't fallback loop forever)
+            # 不支援的技能類型視為已行動 (避免在 fallback 迴圈中無限執行)
             msg = f"[Battle {battle_index}][T{turn:02d}][EnemyAct:{reason}] {mid} unsupported skill={skill.skill_type}/{skill.target} (ignored)"
             self._print_and_record(
                 battle_index, turn,
@@ -650,7 +658,7 @@ class BattleSimulator:
         )
         self._print_and_record_system(battle_index, turn, "System", "BattleEnd", msg)
 
-        # record summary row
+        # 記錄摘要列
         if hasattr(self.reporter, "add_summary"):
             self.reporter.add_summary(
                 battle_index=battle_index,
@@ -679,10 +687,10 @@ class BattleSimulator:
         action_type: str,
         msg: str,
     ) -> None:
-        # console
+        # 控制台輸出
         self.log.info(msg)
 
-        # reporter (system line)
+        # 報表記錄 (系統訊息)
         payload = {
             "battle_index": battle_index,
             "turn": turn,
@@ -701,9 +709,9 @@ class BattleSimulator:
         msg: str,
         **fields: Any,
     ) -> None:
-        # console verbosity control:
-        # - INFO: print main msg
-        # - DEBUG/TRACE: print msg too (same), but you can extend later
+        # 控制台詳細度控制:
+        # - INFO: 印出主要訊息
+        # - DEBUG/TRACE: 也印出訊息 (目前相同，未來可擴充)
         self.log.info(msg)
 
         payload: Dict[str, Any] = {
@@ -719,10 +727,10 @@ class BattleSimulator:
 
     def _report_event(self, payload: Dict[str, Any]) -> None:
         """
-        Reporter adapter:
-        - If BattleReporter has add_event(payload_dict): use it
-        - Else if has record_event(**kwargs): use it
-        - Else: ignore (so simulator never crashes due to reporter mismatch)
+        報表轉接器 (Reporter Adapter):
+        - 若 BattleReporter 有 add_event(payload_dict): 使用之
+        - 若有 record_event(**kwargs): 使用之
+        - 否則: 忽略 (確保模擬器不會因報表介面不符而崩潰)
         """
         if self.reporter is None:
             return

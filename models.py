@@ -46,10 +46,10 @@ class ScaleStat(str, Enum):
     """
     數值加成的參照屬性 (例如：造成攻擊力 100% 的傷害)
     """
-    ATK = "ATK"
-    DEF = "DEF"
-    HP = "HP"
-    None_ = "None"   # use None_ to avoid python keyword conflicts
+    ATK = "ATK"      # 攻擊力
+    DEF = "DEF"      # 防禦力
+    HP = "HP"        # 血量
+    None_ = "None"   # 無 (使用 None_ 避免與 Python 關鍵字衝突)
 
 
 class CardLifecycle(str, Enum):
@@ -80,7 +80,7 @@ class MonsterSkillType(str, Enum):
 
 class ReloadTiming(str, Enum):
     # You have unified to this in sheet
-    AfterEnemyAttackPhase = "AfterEnemyAttackPhase" # 敵方攻擊階段結束後重置計數器
+    AfterEnemyAttackPhase = "AfterEnemyAttackPhase" # 敵方攻擊階段結束後重置計數器 (MVP 預設)
 
 
 class CounterMode(str, Enum):
@@ -113,7 +113,7 @@ class CharacterSnapshot:
     """
     Result of Phase 1: Character Static Calculation
     角色靜態數值快照 (Phase 1 計算結果)
-    This is a frozen view of a character final base stats (ATK/DEF/HP).
+    這是一個凍結的角色最終基礎數值視圖 (ATK/DEF/HP)。
     """
     character_id: str
     final_atk: float
@@ -121,6 +121,7 @@ class CharacterSnapshot:
     final_hp: float
 
     # Optional metadata
+    # 選用元資料
     level: Optional[float] = None
     affection_level: Optional[int] = None
 
@@ -133,11 +134,11 @@ class CharacterSnapshot:
 class PlayerPartySnapshot:
     """
     玩家隊伍快照 (MVP: 共用血條)
-    MVP rule:
-    - Team HP is shared (single HP bar) = sum of members' HP.
-    - Damage taken reduces team_hp.
-    - Shield is team-wide (single shield pool).
-    - ATK/DEF used for card scaling comes from active_character.
+    MVP 規則:
+    - 隊伍血量共用 (單一血條) = 成員血量總和。
+    - 受到傷害時扣除 team_hp。
+    - 護盾為全隊共用 (單一護盾池)。
+    - 卡牌倍率計算時使用的 ATK/DEF 來自當前活動角色 (active_character)。
     """
     members: List[CharacterSnapshot]
     active_character_id: str
@@ -176,6 +177,7 @@ class Card:
     epiphany_tier: int = 0
 
     # NEW: AP cost
+    # 新增: AP 消耗 (預設為 1)
     ap_cost: int = 1
 
 
@@ -235,16 +237,16 @@ class MonsterSkill:
     monster_id: str
     skill_type: MonsterSkillType
 
-    value: float
+    value: float  # 技能數值 (傷害值或護盾值)
 
-    counter_max: int
-    reload_timing: ReloadTiming
+    counter_max: int             # 最大計數 (CD)
+    reload_timing: ReloadTiming  # 重置時機
 
-    counter_mode: CounterMode
-    counter_start_trigger: CounterStartTrigger
-    enemy_phase_action_rule: EnemyPhaseActionRule
+    counter_mode: CounterMode                   # 計數器模式
+    counter_start_trigger: CounterStartTrigger  # 計數器觸發條件
+    enemy_phase_action_rule: EnemyPhaseActionRule # 敵方階段行動規則
 
-    target: TargetType
+    target: TargetType  # 技能目標
 
 
 # =========================================================
@@ -261,11 +263,11 @@ class MonsterState:
     hp: float
     shield: float = 0.0
 
-    counter: int = 0
-    counter_max: int = 0
+    counter: int = 0      # 當前計數
+    counter_max: int = 0  # 最大計數 (用於重置)
 
     # for EnemyPhaseActionRule = ActIfNotActedThisTurn
-    has_acted_this_turn: bool = False
+    has_acted_this_turn: bool = False  # 本回合是否已行動標記
 
 
 @dataclass
