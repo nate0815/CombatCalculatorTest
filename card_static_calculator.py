@@ -1,107 +1,118 @@
-"""
-card_static_calculator.py
+# card_static_calculator.py
+from __future__ import annotations
 
-Phase: Static Card Calculation (Phase 2 MVP)
-Responsibility:
-- Take Phase1 CharacterSnapshot (final ATK/DEF/HP)
-- Apply CardDef (ordered effects) to compute card outputs
-- No draw, no turn, no enemy logic (yet)
-
-MVP supports EffectType:
-- Damage / Shield / Heal
-"""
-
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from models import (
+    Card,
+    CardEffect,
     CharacterSnapshot,
-    CardDef,
-    CardEffectDef,
-    CardEffectResult,
-    CardResult,
+    EffectType,
+    PlayerPartySnapshot,
+    ScaleStat,
+    TargetType,
 )
 
 
-# =========================================================
-# Utils
-# =========================================================
+@dataclass
+class CardEffectResult:
+    """
+    A lightweight, structured result of applying ONE card effect.
+    單一卡牌效果的計算結果 (數值預覽)。
+    This module is kept as a reusable "card math" helper layer.
 
-def debug_print(verbose: bool, *args, **kwargs):
-    if verbose:
-        print(*args, **kwargs)
-
-
-def _get_base_stat(snapshot: CharacterSnapshot, scale_stat: str) -> float:
-    key = (scale_stat or "").strip().upper()
-    if key == "ATK":
-        return float(snapshot.final_atk)
-    if key == "DEF":
-        return float(snapshot.final_def)
-    if key == "HP":
-        return float(snapshot.final_hp)
-    return 0.0
-
-
-def _norm_effect_type(effect_type: str) -> str:
-    return (effect_type or "").strip()
+    Note:
+    - In current MVP, battle_simulator.py applies effects directly for speed.
+    - This module remains useful for future refactor (clean architecture):
+      BattleSimulator -> CardStaticCalculator -> returns results -> apply to state / report.
+    """
+    card_id: str
+    effect_index: int
+    effect_type: EffectType
+    target: str
+    value: float
 
 
-# =========================================================
-# Core Calculation
-# =========================================================
+class CardStaticCalculator:
+    """
+    Card static effect calculator (MVP).
+    卡牌靜態數值計算器。
 
-def calc_effect(snapshot: CharacterSnapshot, eff: CardEffectDef) -> CardEffectResult:
-    base = _get_base_stat(snapshot, eff.scale_stat)
-    mult = float(eff.multiplier)
-    flat = float(eff.flat_value)
-    value = base * mult + flat
+    Responsibilities:
+    - Convert (CardEffect + ActiveCharacterSnapshot + PartySnapshot) into numeric value.
+    - Does NOT mutate battle state.
+    """
 
-    return CardEffectResult(
-        effect_index=eff.effect_index,
-        effect_type=eff.effect_type,
-        scale_stat=eff.scale_stat,
-        base_stat=base,
-        multiplier=mult,
-        flat_value=flat,
-        value=value,
-    )
+    def compute_effect_value(
+        self,
+        party: PlayerPartySnapshot,
+        active_member: CharacterSnapshot,
+        effect: CardEffect,
+    ) -> float:
+        """
+        計算效果數值 = 基礎值(ATK/DEF/HP) * 倍率 + 固定值
+        value = base_stat(effect.scale_stat) * multiplier + flat_value
 
+        MVP decisions:
+        - ATK/DEF use active_member final stats
+        - HP uses party.team_hp_max (because party shares one HP bar)
+        """
+        base = 0.0
+        if effect.scale_stat == ScaleStat.ATK:
+            base = float(active_member.final_atk)
+        elif effect.scale_stat == ScaleStat.DEF:
+            base = float(active_member.final_def)
+        elif effect.scale_stat == ScaleStat.HP:
+            base = float(party.team_hp_max)
+        else:
+            base = 0.0
 
-def calc_card(snapshot: CharacterSnapshot, card: CardDef, verbose: bool = False) -> CardResult:
-    results: List[CardEffectResult] = []
-    totals: Dict[str, float] = {"Damage": 0.0, "Heal": 0.0, "Shield": 0.0}
+        return base * float(effect.multiplier) + float(effect.flat_value)
 
-    debug_print(verbose, "----------------------------------")
-    debug_print(verbose, f"Card: {card.card_id} (Tier={card.epiphany_tier}, Group={card.group_id})")
-    debug_print(verbose, f"Owner: {card.character_id}")
-    debug_print(verbose, f"Snapshot: ATK={snapshot.final_atk}, DEF={snapshot.final_def}, HP={snapshot.final_hp}")
-
-    if not card.effects:
-        debug_print(verbose, "⚠️ No effects found for this card.")
-    else:
-        for eff in card.effects:
-            r = calc_effect(snapshot, eff)
-            results.append(r)
-
-            et = _norm_effect_type(r.effect_type)
-            totals.setdefault(et, 0.0)
-            totals[et] += r.value
-
-            debug_print(
-                verbose,
-                f"  [{r.effect_index}] {r.effect_type} scale={r.scale_stat} "
-                f"base={r.base_stat} mult={r.multiplier} flat={r.flat_value} => {r.value}"
+    def preview_card(
+        self,
+        party: PlayerPartySnapshot,
+        active_member: CharacterSnapshot,
+        card: Card,
+        effects_by_card: Dict[str, List[CardEffect]],
+    ) -> List[CardEffectResult]:
+        """
+        預覽卡牌的所有效果數值 (不改變戰鬥狀態)。
+        Returns a list of computed effect results for a card (no state mutation).
+        Useful for debug / UI tool / future report formatting.
+        """
+        effects = effects_by_card.get(card.card_id, [])
+        out: List[CardEffectResult] = []
+        for eff in effects:
+            v = self.compute_effect_value(party, active_member, eff)
+            out.append(
+                CardEffectResult(
+                    card_id=card.card_id,
+                    effect_index=eff.effect_index,
+                    effect_type=eff.effect_type,
+                    target=str(eff.target.value if hasattr(eff.target, "value") else eff.target),
+                    value=float(v),
+                )
             )
+        return out
 
-    debug_print(
-        verbose,
-        f"Totals: Damage={totals.get('Damage', 0.0)}, Heal={totals.get('Heal', 0.0)}, Shield={totals.get('Shield', 0.0)}"
-    )
 
-    return CardResult(
-        card_id=card.card_id,
-        character_id=card.character_id,
-        epiphany_tier=card.epiphany_tier,
-        effects=results,
-        totals=totals,
-    )
+# ---------------------------------------------------------
+# Optional small helpers for future refactor
+# ---------------------------------------------------------
+
+def compute_all_card_values_for_party(
+    party: PlayerPartySnapshot,
+    active_member: CharacterSnapshot,
+    cards: List[Card],
+    effects_by_card: Dict[str, List[CardEffect]],
+) -> Dict[str, List[CardEffectResult]]:
+    """
+    Convenience function: compute values for many cards at once.
+    """
+    calc = CardStaticCalculator()
+    out: Dict[str, List[CardEffectResult]] = {}
+    for c in cards:
+        out[c.card_id] = calc.preview_card(party, active_member, c, effects_by_card)
+    return out
