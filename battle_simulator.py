@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+import random
 
 from battle_reporter import BattleReporter
 from models import (
@@ -32,9 +33,16 @@ class BattleConfig:
     max_turns: int = 999
     log_level: LogLevel = LogLevel.INFO
 
-    # 若為 True: 當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段。
-    # 若為 False: 跳過該卡牌直到找到可負擔的卡牌 (MVP 預設保持 True)。
+    # kept for backward compatibility with main.py
+    # 舊版語意：當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段
+    # 新版抽手牌邏輯下：我們會改成「沒有可出的牌就結束玩家階段」
     stop_when_insufficient_ap: bool = True
+
+    # 新增：每回合抽牌數
+    hand_size: int = 5
+
+    # 可選：固定亂數種子方便重現
+    rng_seed: Optional[int] = None
 
 
 class BattleLogger:
@@ -61,15 +69,18 @@ def clamp(v: float, lo: float, hi: float) -> float:
 def apply_damage(hp: float, shield: float, dmg: float) -> Tuple[float, float]:
     """Damage consumes shield first, then hp."""
     if dmg <= 0:
-        return hp, shield
+        return max(0.0, hp), max(0.0, shield)
+
     remaining = dmg
     if shield > 0:
         used = min(shield, remaining)
         shield -= used
         remaining -= used
+
     if remaining > 0:
         hp -= remaining
-    return hp, shield
+
+    return max(0.0, hp), max(0.0, shield)
 
 
 def pick_enemy_single(
@@ -87,18 +98,26 @@ class BattleSimulator:
     """
     MVP 戰鬥流程包含:
     - 隊伍共用血條 (PlayerPartySnapshot.team_hp / team_hp_max)
-    - AP 系統 (最大 AP=3)，每張卡牌有 AP 消耗
+    - 隊伍共用護盾池 (PlayerPartySnapshot.team_shield)
+    - AP 系統 (最大 AP=3)，每張卡牌依 Card.ap_cost 消耗
+    - 抽牌/棄牌/洗牌:
+        1) 初始全部卡牌進 Draw Pile
+        2) 玩家回合開始抽 hand_size 張
+        3) 每次出牌：先看 AP -> 找出手牌中可出卡 -> 隨機挑 1 張打出
+        4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
+        5) 回合結束：手牌剩餘全部丟棄牌堆
+        6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
     - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
     - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
-    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且計數器 > 0 => 在敵方階段行動一次
+    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
     - 重置時機 (AfterEnemyAttackPhase): 怪物本回合行動後，於敵方階段結束時重置計數器
-    - 詳細日誌記錄於 BattleReporter EventLog；控制台也會印出流程
     """
 
     def __init__(self, config: BattleConfig, reporter: BattleReporter) -> None:
         self.config = config
         self.reporter = reporter
         self.log = BattleLogger(config.log_level)
+        self._rng = random.Random(config.rng_seed)
 
     # =========================================================
     # Public
@@ -115,6 +134,10 @@ class BattleSimulator:
     ) -> List[BattleResult]:
         results: List[BattleResult] = []
         for i in range(1, battle_count + 1):
+            # 每場 battle 有獨立亂數序列（但仍可重現）
+            if self.config.rng_seed is not None:
+                self._rng = random.Random(self.config.rng_seed + i)
+
             res = self.run_single(
                 battle_index=i,
                 party=party,
@@ -146,7 +169,6 @@ class BattleSimulator:
             active_character_id=party.active_character_id,
         )
         party_runtime.team_shield = 0.0  # 重置護盾
-
         active_member = party_runtime.get_active_member()
 
         # --------------------------
@@ -157,6 +179,7 @@ class BattleSimulator:
         for sk in monster_skills:
             skills_by_monster.setdefault(sk.monster_id, []).append(sk)
         for mid in skills_by_monster:
+            # 讓技能順序可預期
             skills_by_monster[mid].sort(key=lambda s: s.skill_id)
 
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]] = []
@@ -179,109 +202,141 @@ class BattleSimulator:
             )
             monsters.append((mi, base, st))
 
+        if not party_cards:
+            raise ValueError("❌ No cards for party.")
+
+        # --------------------------
+        # Deck runtime state
+        # 抽牌/棄牌/洗牌：runtime 狀態
+        # --------------------------
+        draw_pile: List[Card] = list(party_cards)
+        discard_pile: List[Card] = []
+        hand: List[Card] = []
+
+        self._rng.shuffle(draw_pile)
+
         # --------------------------
         # Init logs
         # 初始化日誌
         # --------------------------
         self._print_and_record_system(
-            battle_index, 0, "System", "BattleStart",
-            f"=== Battle {battle_index} Start ==="
+            battle_index, 0, "System", "BattleStart", f"=== Battle {battle_index} Start ==="
         )
         self._print_and_record_system(
-            battle_index, 0, "System", "Init",
+            battle_index,
+            0,
+            "System",
+            "Init",
             f"[Init] PartyHP={party_runtime.team_hp:.1f}/{party_runtime.team_hp_max:.1f} "
-            f"Shield={party_runtime.team_shield:.1f} Active={active_member.character_id}"
+            f"Shield={party_runtime.team_shield:.1f} Active={active_member.character_id}",
         )
         self._print_and_record_system(
-            battle_index, 0, "System", "InitEnemies",
-            "[Init] Enemies=" + ", ".join(
-                [f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]
-            )
+            battle_index,
+            0,
+            "System",
+            "InitEnemies",
+            "[Init] Enemies="
+            + ", ".join([f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]),
         )
 
-        if not party_cards:
-            raise ValueError("❌ No cards for party. Check Card sheet CharacterId filters.")
-
-        # 決定性的發牌順序 (依 card_id 排序，確保每次模擬一致)
-        card_order = sorted(party_cards, key=lambda c: (c.character_id, c.card_id))
-        card_cursor = 0
-
-        turn = 1
-        while turn <= self.config.max_turns:
-            # 每回合開始時，重置怪物的「已行動」標記
-            for _, _, mst in monsters:
-                mst.has_acted_this_turn = False
-
-            ap = self.config.ap_max
-
-            self._print_and_record_system(
-                battle_index, turn, "System", "TurnStart",
-                f"[Battle {battle_index}][T{turn:02d}] Turn Start (AP={ap})",
-            )
-
-            # ==========================
-            # Player Phase (AP driven)
-            # 玩家階段 (AP 驅動)
-            # ==========================
-            self._print_and_record_system(
-                battle_index, turn, "Player", "PhaseStart",
-                f"[Battle {battle_index}][T{turn:02d}][Player] Start (AP={ap})",
-            )
-
-            while ap > 0:
-                card = card_order[card_cursor % len(card_order)]
-                card_cursor += 1
-
-                cost = max(0, int(card.ap_cost))
-                if cost > ap:
-                    msg = (
-                        f"[Battle {battle_index}][T{turn:02d}][AP] "
-                        f"Insufficient AP for {card.card_id} cost={cost} AP={ap}"
-                    )
-                    self._print_and_record(
-                        battle_index, turn, "Player", "APStop", msg,
-                        actor=active_member.character_id,
-                        card_id=card.card_id,
-                        ap_before=ap, ap_after=ap,
-                    )
-                    if self.config.stop_when_insufficient_ap:
-                        break
+        def draw_cards(turn: int, n: int) -> None:
+            """Draw up to n cards into hand. If draw pile insufficient, shuffle discard into draw."""
+            nonlocal draw_pile, discard_pile, hand
+            for _ in range(n):
+                if not draw_pile:
+                    if discard_pile:
+                        draw_pile = discard_pile
+                        discard_pile = []
+                        self._rng.shuffle(draw_pile)
+                        self._print_and_record_system(
+                            battle_index,
+                            turn,
+                            "System",
+                            "Shuffle",
+                            f"[Shuffle] Discard -> Draw (count={len(draw_pile)})",
+                        )
                     else:
-                        continue
+                        break
+                hand.append(draw_pile.pop())
 
-                ap_before = ap
+        # --------------------------
+        # Main loop
+        # --------------------------
+        turn = 0
+        while True:
+            turn += 1
+            if turn > self.config.max_turns:
+                # 超過回合上限：以目前狀態返回
+                return BattleResult(
+                    battle_index=battle_index,
+                    winner="Enemy" if party_runtime.team_hp <= 0 else "Player",
+                    turns=turn - 1,
+                    player_hp_end=float(party_runtime.team_hp),
+                    enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
+                )
+
+            # Reset per-turn flags
+            for _, _, st in monsters:
+                st.has_acted_this_turn = False
+
+            # =========================
+            # Player Phase
+            # =========================
+            ap = int(self.config.ap_max)
+
+            # 回合開始抽手牌
+            hand.clear()
+            draw_cards(turn, int(self.config.hand_size))
+
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                "System",
+                "TurnStart",
+                f"--- Turn {turn} Start --- (AP={ap}, Hand={len(hand)}, Draw={len(draw_pile)}, Discard={len(discard_pile)})",
+            )
+
+            # 玩家出牌迴圈：先看 AP -> 篩可出 -> 隨機挑 1 張出
+            while ap > 0:
+                playable = [c for c in hand if int(getattr(c, "ap_cost", 1)) <= ap]
+                if not playable:
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        "System",
+                        "NoPlayableCard",
+                        f"[PlayerPhase] No playable card (AP={ap}, Hand={len(hand)}) -> End Player Phase",
+                    )
+                    break
+
+                card = self._rng.choice(playable)
+                cost = int(getattr(card, "ap_cost", 1))
+
+                # 扣 AP，從手牌移除，丟棄牌堆
                 ap -= cost
+                hand.remove(card)
+                discard_pile.append(card)
 
-                msg = (
-                    f"[Battle {battle_index}][T{turn:02d}][Player] "
-                    f"Play {card.card_id} (cost={cost}, AP {ap_before}->{ap})"
-                )
-                self._print_and_record(
-                    battle_index, turn, "Player", "PlayCard", msg,
-                    actor=active_member.character_id,
-                    card_id=card.card_id,
-                    ap_before=ap_before, ap_after=ap,
-                    player_hp_before=party_runtime.team_hp,
-                    player_shield_before=party_runtime.team_shield,
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    active_member.character_id,
+                    "PlayCard",
+                    f"[PlayCard] {active_member.character_id} plays {card.card_id} (Cost={cost}, APLeft={ap})",
                 )
 
-                # 依序套用卡牌效果
                 effects = card_effects_by_id.get(card.card_id, [])
-                for eff in effects:
+                for ef in effects:
                     self._apply_card_effect(
                         battle_index=battle_index,
                         turn=turn,
                         party=party_runtime,
-                        active_member=active_member,
+                        active_member_id=active_member.character_id,
+                        effect=ef,
                         monsters=monsters,
-                        card=card,
-                        eff=eff,
                     )
-                    if self._is_battle_end(party_runtime, monsters):
-                        winner = self._get_winner(party_runtime, monsters)
-                        return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
 
-                # 每打出一張卡牌 (任意卡牌)，觸發一次計數器檢查
+                # 玩家出任意卡牌 -> tick counters
                 self._tick_counters_on_player_play_card(
                     battle_index=battle_index,
                     turn=turn,
@@ -289,207 +344,172 @@ class BattleSimulator:
                     monsters=monsters,
                     skills_by_monster=skills_by_monster,
                 )
-                if self._is_battle_end(party_runtime, monsters):
-                    winner = self._get_winner(party_runtime, monsters)
-                    return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
 
-            self._print_and_record_system(
-                battle_index, turn, "Player", "PhaseEnd",
-                f"[Battle {battle_index}][T{turn:02d}][Player] End",
-            )
-
-            if self._is_battle_end(party_runtime, monsters):
+                # Battle end check
                 winner = self._get_winner(party_runtime, monsters)
-                return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
+                if winner is not None:
+                    return BattleResult(
+                        battle_index=battle_index,
+                        winner=winner,
+                        turns=turn,
+                        player_hp_end=float(party_runtime.team_hp),
+                        enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
+                    )
 
-            # ==========================
-            # Enemy Phase (fallback)
-            # 敵方階段 (補行動)
-            # ==========================
-            self._print_and_record_system(
-                battle_index, turn, "EnemyPhase", "PhaseStart",
-                f"[Battle {battle_index}][T{turn:02d}][EnemyPhase] Start",
-            )
+            # 回合結束：手牌剩餘全部丟棄牌堆
+            if hand:
+                discard_pile.extend(hand)
+                hand.clear()
 
-            # 針對尚未行動且計數器 > 0 的怪物執行補救行動 (Fallback Action)
-            for mi, _, mst in monsters:
-                if mst.hp <= 0:
+            # =========================
+            # Enemy Phase
+            # =========================
+            for (mi, base, st) in monsters:
+                if st.hp <= 0:
                     continue
+
                 sk_list = skills_by_monster.get(mi.monster_id, [])
                 if not sk_list:
                     continue
-                active_skill = sk_list[0]
+                sk = sk_list[0]
 
-                if active_skill.enemy_phase_action_rule == EnemyPhaseActionRule.ActIfNotActedThisTurn:
-                    if (not mst.has_acted_this_turn) and mst.counter > 0:
-                        msg = (
-                            f"[Battle {battle_index}][T{turn:02d}][EnemyPhase] "
-                            f"{mi.monster_id} fallback act (counter={mst.counter})"
-                        )
-                        self._print_and_record(
-                            battle_index, turn, "EnemyPhase", "FallbackAct", msg,
-                            actor=mi.monster_id,
-                            monster_id=mi.monster_id,
-                            counter_before=mst.counter,
-                        )
+                # 若設定為 ActIfNotActedThisTurn，且本回合尚未行動，且 counter > 0，則在敵方階段行動一次
+                if sk.enemy_phase_action_rule == EnemyPhaseActionRule.ActIfNotActedThisTurn:
+                    if (not st.has_acted_this_turn) and (st.counter > 0):
                         self._monster_act(
                             battle_index=battle_index,
                             turn=turn,
                             party=party_runtime,
                             monster_index=mi,
-                            monster_state=mst,
-                            skill=active_skill,
-                            reason="EnemyPhaseFallback",
-                        )
-                        if self._is_battle_end(party_runtime, monsters):
-                            winner = self._get_winner(party_runtime, monsters)
-                            return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
-
-            # 敵方攻擊階段結束後重置計數器 (MVP: 重置本回合有行動的怪物)
-            for mi, _, mst in monsters:
-                if mst.hp <= 0:
-                    continue
-                if mst.has_acted_this_turn:
-                    sk_list = skills_by_monster.get(mi.monster_id, [])
-                    if not sk_list:
-                        continue
-                    active_skill = sk_list[0]
-                    if active_skill.reload_timing == ReloadTiming.AfterEnemyAttackPhase:
-                        before = mst.counter
-                        mst.counter_max = int(active_skill.counter_max)
-                        mst.counter = int(active_skill.counter_max)
-                        msg = f"[Battle {battle_index}][T{turn:02d}][Reload] {mi.monster_id} {before}->{mst.counter}"
-                        self._print_and_record(
-                            battle_index, turn, "EnemyPhase", "Reload", msg,
-                            actor=mi.monster_id,
-                            monster_id=mi.monster_id,
-                            counter_before=before,
-                            counter_after=mst.counter,
+                            monster_base=base,
+                            monster_state=st,
+                            skills_by_monster=skills_by_monster,
+                            reason="EnemyPhase",
                         )
 
-            self._print_and_record_system(
-                battle_index, turn, "EnemyPhase", "PhaseEnd",
-                f"[Battle {battle_index}][T{turn:02d}][EnemyPhase] End",
-            )
-
-            if self._is_battle_end(party_runtime, monsters):
                 winner = self._get_winner(party_runtime, monsters)
-                return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
+                if winner is not None:
+                    return BattleResult(
+                        battle_index=battle_index,
+                        winner=winner,
+                        turns=turn,
+                        player_hp_end=float(party_runtime.team_hp),
+                        enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
+                    )
 
-            turn += 1
+            # =========================
+            # End of Turn: Reload (AfterEnemyAttackPhase)
+            # =========================
+            for (mi, _, st) in monsters:
+                if st.hp <= 0:
+                    continue
+                if not st.has_acted_this_turn:
+                    continue
 
-        # 超過最大回合數，強制結束
-        winner = "Unknown"
-        return self._finalize_battle(battle_index, turn, winner, party_runtime, monsters)
+                sk_list = skills_by_monster.get(mi.monster_id, [])
+                if not sk_list:
+                    continue
+                sk = sk_list[0]
+
+                if sk.reload_timing == ReloadTiming.AfterEnemyAttackPhase:
+                    st.counter = int(st.counter_max)
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        mi.monster_id,
+                        "Reload",
+                        f"[Reload] counter reset to {st.counter}",
+                    )
+
+            winner = self._get_winner(party_runtime, monsters)
+            if winner is not None:
+                return BattleResult(
+                    battle_index=battle_index,
+                    winner=winner,
+                    turns=turn,
+                    player_hp_end=float(party_runtime.team_hp),
+                    enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
+                )
 
     # =========================================================
-    # Card effect application
+    # Internal - Effects
     # =========================================================
-    def _get_scale_base(self, party: PlayerPartySnapshot, active_member: Any, stat: ScaleStat) -> float:
-        if stat == ScaleStat.ATK:
-            return float(active_member.final_atk)
-        if stat == ScaleStat.DEF:
-            return float(active_member.final_def)
-        if stat == ScaleStat.HP:
-            # MVP: 共用血條系統使用隊伍最大血量
-            return float(party.team_hp_max)
-        return 0.0
-
     def _apply_card_effect(
         self,
         battle_index: int,
         turn: int,
         party: PlayerPartySnapshot,
-        active_member: Any,
+        active_member_id: str,
+        effect: CardEffect,
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-        card: Card,
-        eff: CardEffect,
     ) -> None:
-        base = self._get_scale_base(party, active_member, eff.scale_stat)
-        value = base * float(eff.multiplier) + float(eff.flat_value)
-
-        if eff.effect_type == EffectType.Damage:
-            # 傷害效果: 優先扣除護盾，再扣除血量
-            if eff.target == TargetType.EnemyAll:
-                for mi, _, mst in monsters:
-                    if mst.hp <= 0:
-                        continue
-                    hp_b, sh_b = mst.hp, mst.shield
-                    mst.hp, mst.shield = apply_damage(mst.hp, mst.shield, value)
-                    msg = (
-                        f"[Battle {battle_index}][T{turn:02d}][CardDamage] {card.card_id} -> {mi.monster_id} "
-                        f"dmg={value:.1f} (Shield {sh_b:.1f}->{mst.shield:.1f}, HP {hp_b:.1f}->{mst.hp:.1f})"
-                    )
-                    self._print_and_record(
-                        battle_index, turn, "Player", "Damage", msg,
-                        actor=active_member.character_id,
-                        card_id=card.card_id,
-                        monster_id=mi.monster_id,
-                        target="EnemyAll",
-                        value=float(value),
-                        enemy_hp_before=hp_b, enemy_hp_after=mst.hp,
-                        enemy_shield_before=sh_b, enemy_shield_after=mst.shield,
-                        player_hp_before=party.team_hp, player_hp_after=party.team_hp,
-                        player_shield_before=party.team_shield, player_shield_after=party.team_shield,
-                    )
-            else:
-                pick = pick_enemy_single(monsters)
-                if pick is None:
-                    return
-                mi, _, mst = pick
-                hp_b, sh_b = mst.hp, mst.shield
-                mst.hp, mst.shield = apply_damage(mst.hp, mst.shield, value)
-                msg = (
-                    f"[Battle {battle_index}][T{turn:02d}][CardDamage] {card.card_id} -> {mi.monster_id} "
-                    f"dmg={value:.1f} (Shield {sh_b:.1f}->{mst.shield:.1f}, HP {hp_b:.1f}->{mst.hp:.1f})"
-                )
-                self._print_and_record(
-                    battle_index, turn, "Player", "Damage", msg,
-                    actor=active_member.character_id,
-                    card_id=card.card_id,
-                    monster_id=mi.monster_id,
-                    target="EnemySingle",
-                    value=float(value),
-                    enemy_hp_before=hp_b, enemy_hp_after=mst.hp,
-                    enemy_shield_before=sh_b, enemy_shield_after=mst.shield,
-                )
-
-        elif eff.effect_type == EffectType.Shield:
-            # 護盾效果: 增加隊伍共用護盾
-            sh_b = party.team_shield
-            party.team_shield += float(value)
-            msg = f"[Battle {battle_index}][T{turn:02d}][CardShield] +{value:.1f} (Shield {sh_b:.1f}->{party.team_shield:.1f})"
-            self._print_and_record(
-                battle_index, turn, "Player", "Shield", msg,
-                actor=active_member.character_id,
-                card_id=card.card_id,
-                target="Party",
-                value=float(value),
-                player_shield_before=sh_b,
-                player_shield_after=party.team_shield,
-                player_hp_before=party.team_hp,
-                player_hp_after=party.team_hp,
-            )
-
-        elif eff.effect_type == EffectType.Heal:
-            # 治療效果: 恢復隊伍血量，不超過上限
-            hp_b = party.team_hp
-            party.team_hp = clamp(party.team_hp + float(value), 0.0, party.team_hp_max)
-            msg = f"[Battle {battle_index}][T{turn:02d}][CardHeal] +{value:.1f} (HP {hp_b:.1f}->{party.team_hp:.1f})"
-            self._print_and_record(
-                battle_index, turn, "Player", "Heal", msg,
-                actor=active_member.character_id,
-                card_id=card.card_id,
-                target="Party",
-                value=float(value),
-                player_hp_before=hp_b,
-                player_hp_after=party.team_hp,
-            )
+        # Value = base(stat)*multiplier + flat_value
+        if effect.scale_stat == ScaleStat.ATK:
+            base_value = party.get_active_member().final_atk if party.active_character_id == active_member_id else party.get_active_member().final_atk
+            base_value = party.get_active_member().final_atk if party.get_active_member().character_id == active_member_id else party.get_active_member().final_atk
+            base_value = party.get_active_member().final_atk
+        elif effect.scale_stat == ScaleStat.DEF:
+            base_value = party.get_active_member().final_def
+        elif effect.scale_stat == ScaleStat.HP:
+            # 隊伍共用血條：HP scale 用 team_hp_max
+            base_value = party.team_hp_max
         else:
-            self.log.debug(f"[Battle {battle_index}][T{turn:02d}][CardEffect] Unsupported {eff.effect_type} ignored")
+            base_value = 0.0
+
+        value = float(base_value) * float(effect.multiplier) + float(effect.flat_value)
+
+        if effect.effect_type == EffectType.Damage:
+            if effect.target == TargetType.EnemyAll:
+                for (mi, _, st) in monsters:
+                    if st.hp <= 0:
+                        continue
+                    old_hp, old_sh = st.hp, st.shield
+                    st.hp, st.shield = apply_damage(st.hp, st.shield, value)
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        "Player",
+                        "Damage",
+                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} Shield {old_sh:.1f}->{st.shield:.1f}",
+                    )
+            elif effect.target == TargetType.EnemySingle:
+                picked = pick_enemy_single(monsters)
+                if picked is not None:
+                    mi, _, st = picked
+                    old_hp, old_sh = st.hp, st.shield
+                    st.hp, st.shield = apply_damage(st.hp, st.shield, value)
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        "Player",
+                        "Damage",
+                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} Shield {old_sh:.1f}->{st.shield:.1f}",
+                    )
+
+        elif effect.effect_type == EffectType.Shield:
+            old = party.team_shield
+            party.team_shield = max(0.0, party.team_shield + value)
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                "Player",
+                "Shield",
+                f"[Shield] +{value:.1f} (Shield {old:.1f} -> {party.team_shield:.1f})",
+            )
+
+        elif effect.effect_type == EffectType.Heal:
+            old = party.team_hp
+            party.team_hp = clamp(party.team_hp + value, 0.0, party.team_hp_max)
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                "Player",
+                "Heal",
+                f"[Heal] +{value:.1f} (HP {old:.1f} -> {party.team_hp:.1f})",
+            )
 
     # =========================================================
-    # Counter tick + reaction
+    # Internal - Counter / Monster act
     # =========================================================
     def _tick_counters_on_player_play_card(
         self,
@@ -499,257 +519,122 @@ class BattleSimulator:
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
         skills_by_monster: Dict[str, List[MonsterSkill]],
     ) -> None:
-        for mi, _, mst in monsters:
-            if mst.hp <= 0:
+        for (mi, base, st) in monsters:
+            if st.hp <= 0:
                 continue
+
             sk_list = skills_by_monster.get(mi.monster_id, [])
             if not sk_list:
                 continue
-            skill = sk_list[0]
+            sk = sk_list[0]
 
-            # MVP 支援: 啟用狀態 + 玩家打出卡牌時觸發
-            if skill.counter_mode != CounterMode.Enabled:
+            if sk.counter_mode != CounterMode.Enabled:
                 continue
-            if skill.counter_start_trigger != CounterStartTrigger.OnPlayerPlayCard:
+            if sk.counter_start_trigger != CounterStartTrigger.OnPlayerPlayCard:
                 continue
 
-            before = mst.counter
-            mst.counter = max(0, mst.counter - 1)
-
-            msg = f"[Battle {battle_index}][T{turn:02d}][Counter] {mi.monster_id} {before}->{mst.counter} (OnPlayerPlayCard)"
-            self._print_and_record(
-                battle_index, turn, "Player", "Counter", msg,
-                actor=mi.monster_id,
-                monster_id=mi.monster_id,
-                counter_before=before,
-                counter_after=mst.counter,
+            before = st.counter
+            st.counter = max(0, int(st.counter) - 1)
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                mi.monster_id,
+                "CounterTick",
+                f"[Counter] {before} -> {st.counter}",
             )
 
-            # 反應機制: 若在玩家階段計數器歸零，且本回合尚未行動，則立即反擊
-            if mst.counter == 0 and (not mst.has_acted_this_turn):
-                msg2 = f"[Battle {battle_index}][T{turn:02d}][Reaction] {mi.monster_id} counter==0 => retaliate now"
-                self._print_and_record(
-                    battle_index, turn, "Reaction", "Retaliate", msg2,
-                    actor=mi.monster_id,
-                    monster_id=mi.monster_id,
-                )
+            # Reaction: counter==0 and not acted => act immediately
+            if st.counter == 0 and (not st.has_acted_this_turn):
                 self._monster_act(
                     battle_index=battle_index,
                     turn=turn,
                     party=party,
                     monster_index=mi,
-                    monster_state=mst,
-                    skill=skill,
+                    monster_base=base,
+                    monster_state=st,
+                    skills_by_monster=skills_by_monster,
                     reason="PlayerPhaseReaction",
                 )
 
-    # =========================================================
-    # Monster action
-    # =========================================================
     def _monster_act(
         self,
         battle_index: int,
         turn: int,
         party: PlayerPartySnapshot,
         monster_index: MonsterIndex,
+        monster_base: MonsterBaseStat,
         monster_state: MonsterState,
-        skill: MonsterSkill,
+        skills_by_monster: Dict[str, List[MonsterSkill]],
         reason: str,
     ) -> None:
-        mid = monster_index.monster_id
+        if monster_state.hp <= 0:
+            return
 
-        if skill.skill_type == MonsterSkillType.Attack and skill.target == TargetType.Player:
-            hp_b = party.team_hp
-            sh_b = party.team_shield
+        sk_list = skills_by_monster.get(monster_index.monster_id, [])
+        if not sk_list:
+            return
 
-            party.team_hp, party.team_shield = apply_damage(
-                party.team_hp, party.team_shield, float(skill.value)
-            )
+        # MVP: 只用第一個技能
+        sk = sk_list[0]
+        monster_state.has_acted_this_turn = True
 
-            msg = (
-                f"[Battle {battle_index}][T{turn:02d}][EnemyAttack:{reason}] {mid} -> Party "
-                f"dmg={float(skill.value):.1f} (Shield {sh_b:.1f}->{party.team_shield:.1f}, HP {hp_b:.1f}->{party.team_hp:.1f})"
-            )
-            self._print_and_record(
-                battle_index, turn,
-                "EnemyPhase" if "EnemyPhase" in reason else "Reaction",
+        if sk.skill_type == MonsterSkillType.Attack:
+            dmg = float(sk.value)
+            old_hp, old_sh = party.team_hp, party.team_shield
+            party.team_hp, party.team_shield = apply_damage(party.team_hp, party.team_shield, dmg)
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                monster_index.monster_id,
                 "EnemyAttack",
-                msg,
-                actor=mid,
-                monster_id=mid,
-                target="Party",
-                value=float(skill.value),
-                player_hp_before=hp_b,
-                player_hp_after=party.team_hp,
-                player_shield_before=sh_b,
-                player_shield_after=party.team_shield,
+                f"[Damage] ({reason}) {monster_index.monster_id} -> Party "
+                f"Dmg={dmg:.1f} | HP {old_hp:.1f}->{party.team_hp:.1f} Shield {old_sh:.1f}->{party.team_shield:.1f}",
             )
-            monster_state.has_acted_this_turn = True
 
-        elif skill.skill_type == MonsterSkillType.AddShield and skill.target == TargetType.Self:
-            sh_b = monster_state.shield
-            monster_state.shield += float(skill.value)
-            msg = (
-                f"[Battle {battle_index}][T{turn:02d}][EnemyShield:{reason}] {mid} +{float(skill.value):.1f} "
-                f"(Shield {sh_b:.1f}->{monster_state.shield:.1f})"
-            )
-            self._print_and_record(
-                battle_index, turn,
-                "EnemyPhase" if "EnemyPhase" in reason else "Reaction",
+        elif sk.skill_type == MonsterSkillType.AddShield:
+            old = monster_state.shield
+            monster_state.shield = max(0.0, monster_state.shield + float(sk.value))
+            self._print_and_record_system(
+                battle_index,
+                turn,
+                monster_index.monster_id,
                 "EnemyShield",
-                msg,
-                actor=mid,
-                monster_id=mid,
-                target="Self",
-                value=float(skill.value),
-                enemy_shield_before=sh_b,
-                enemy_shield_after=monster_state.shield,
+                f"[EnemyShield] ({reason}) +{float(sk.value):.1f} (Shield {old:.1f} -> {monster_state.shield:.1f})",
             )
-            monster_state.has_acted_this_turn = True
-
-        else:
-            # 不支援的技能類型視為已行動 (避免在 fallback 迴圈中無限執行)
-            msg = f"[Battle {battle_index}][T{turn:02d}][EnemyAct:{reason}] {mid} unsupported skill={skill.skill_type}/{skill.target} (ignored)"
-            self._print_and_record(
-                battle_index, turn,
-                "EnemyPhase" if "EnemyPhase" in reason else "Reaction",
-                "EnemyAct",
-                msg,
-                actor=mid,
-                monster_id=mid,
-            )
-            monster_state.has_acted_this_turn = True
 
     # =========================================================
-    # End / Result helpers
+    # Internal - End check
     # =========================================================
-    def _is_battle_end(
-        self,
-        party: PlayerPartySnapshot,
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-    ) -> bool:
-        if party.team_hp <= 0:
-            return True
-        alive = sum(1 for _, _, mst in monsters if mst.hp > 0)
-        return alive == 0
-
     def _get_winner(
         self,
         party: PlayerPartySnapshot,
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-    ) -> str:
+    ) -> Optional[str]:
         if party.team_hp <= 0:
             return "Enemy"
-        alive = sum(1 for _, _, mst in monsters if mst.hp > 0)
-        return "Player" if alive == 0 else "Unknown"
-
-    def _finalize_battle(
-        self,
-        battle_index: int,
-        turn: int,
-        winner: str,
-        party: PlayerPartySnapshot,
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-    ) -> BattleResult:
-        enemies_alive = sum(1 for _, _, mst in monsters if mst.hp > 0)
-        msg = (
-            f"=== Battle {battle_index} End === Winner={winner} Turns={turn} "
-            f"PartyHP={party.team_hp:.1f} EnemiesAlive={enemies_alive}"
-        )
-        self._print_and_record_system(battle_index, turn, "System", "BattleEnd", msg)
-
-        # 記錄摘要列
-        if hasattr(self.reporter, "add_summary"):
-            self.reporter.add_summary(
-                battle_index=battle_index,
-                winner=winner,
-                turns=turn,
-                player_hp_end=float(party.team_hp),
-                enemies_alive=int(enemies_alive),
-            )
-
-        return BattleResult(
-            battle_index=battle_index,
-            winner=winner,
-            turns=turn,
-            player_hp_end=float(party.team_hp),
-            enemies_alive=int(enemies_alive),
-        )
+        if all(st.hp <= 0 for _, _, st in monsters):
+            return "Player"
+        return None
 
     # =========================================================
-    # Logging bridge (console + reporter)
+    # Reporter helpers (use BattleReporter.add_event)
     # =========================================================
     def _print_and_record_system(
         self,
         battle_index: int,
         turn: int,
-        phase: str,
-        action_type: str,
-        msg: str,
+        actor: str,
+        event_type: str,
+        message: str,
     ) -> None:
-        # 控制台輸出
-        self.log.info(msg)
+        self.log.info(message)
 
-        # 報表記錄 (系統訊息)
-        payload = {
-            "battle_index": battle_index,
-            "turn": turn,
-            "phase": phase,
-            "action_type": action_type,
-            "msg": msg,
-        }
-        self._report_event(payload)
-
-    def _print_and_record(
-        self,
-        battle_index: int,
-        turn: int,
-        phase: str,
-        action_type: str,
-        msg: str,
-        **fields: Any,
-    ) -> None:
-        # 控制台詳細度控制:
-        # - INFO: 印出主要訊息
-        # - DEBUG/TRACE: 也印出訊息 (目前相同，未來可擴充)
-        self.log.info(msg)
-
+        # Reporter event log is optional (enable_event_log=False by default)
         payload: Dict[str, Any] = {
             "battle_index": battle_index,
             "turn": turn,
-            "phase": phase,
-            "action_type": action_type,
-            "msg": msg,
+            "actor": actor,
+            "event_type": event_type,
+            "message": message,
         }
-        payload.update(fields)
-
-        self._report_event(payload)
-
-    def _report_event(self, payload: Dict[str, Any]) -> None:
-        """
-        報表轉接器 (Reporter Adapter):
-        - 若 BattleReporter 有 add_event(payload_dict): 使用之
-        - 若有 record_event(**kwargs): 使用之
-        - 否則: 忽略 (確保模擬器不會因報表介面不符而崩潰)
-        """
-        if self.reporter is None:
-            return
-
-        if hasattr(self.reporter, "add_event"):
-            try:
-                # expected: add_event(dict)
-                self.reporter.add_event(payload)
-                return
-            except TypeError:
-                # maybe add_event(**kwargs)
-                try:
-                    self.reporter.add_event(**payload)
-                    return
-                except Exception:
-                    return
-
-        if hasattr(self.reporter, "record_event"):
-            try:
-                self.reporter.record_event(**payload)
-            except Exception:
-                return
+        self.reporter.add_event(payload)
