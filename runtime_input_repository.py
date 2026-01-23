@@ -12,7 +12,10 @@ import pandas as pd
 # Helpers
 # ----------------------------
 def _norm_cell(v: Any) -> Optional[Any]:
-    """Normalize excel cell values: treat None/'None'/'' as None."""
+    """
+    標準化 Excel 儲存格的值。
+    將 None, "None", 空字串統一視為 None，方便後續處理。
+    """
     if v is None:
         return None
     if isinstance(v, str):
@@ -24,6 +27,7 @@ def _norm_cell(v: Any) -> Optional[Any]:
 
 
 def _to_int(v: Any, default: int = 0) -> int:
+    """嘗試將值轉換為整數，若失敗則回傳預設值。"""
     v = _norm_cell(v)
     if v is None:
         return default
@@ -34,6 +38,7 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
+    """嘗試將值轉換為浮點數，若失敗則回傳預設值。"""
     v = _norm_cell(v)
     if v is None:
         return default
@@ -44,6 +49,10 @@ def _to_float(v: Any, default: float = 0.0) -> float:
 
 
 def _to_bool(v, default: bool = False) -> bool:
+    """
+    嘗試將值轉換為布林值。
+    支援字串 ("true", "yes", "1") 與數值 (1/0) 的判斷。
+    """
     # None / NaN / empty -> default
     try:
         import pandas as pd
@@ -79,6 +88,10 @@ def _to_bool(v, default: bool = False) -> bool:
 # ----------------------------
 @dataclass
 class FragmentInput:
+    """
+    碎片 (Fragment) 輸入資料結構。
+    對應 Excel 中的 FragmentIdList, FragmentLevelList 等欄位。
+    """
     fragment_id: str
     level: float = 0.0
     random_stat: Optional[str] = None
@@ -87,12 +100,19 @@ class FragmentInput:
 
 @dataclass
 class PotentialNodeInput:
+    """
+    潛能節點 (Potential Node) 輸入資料結構。
+    """
     node_id: str
     level: float = 0.0
 
 
 @dataclass
 class CharacterLoadoutInput:
+    """
+    單一角色的完整戰鬥配置輸入。
+    包含等級、夥伴、好感度，以及列表式的裝備、卡牌、碎片、潛能等資訊。
+    """
     character_id: str
     level: float
 
@@ -117,7 +137,12 @@ class CharacterLoadoutInput:
 # ----------------------------
 class RuntimeInputRepository:
     """
-    Parse CombatInputPanel.xlsx (block + list rows format) into structured inputs.
+    負責讀取 CombatInputPanel.xlsx 並解析為結構化資料。
+
+    Excel 格式說明：
+    - 採用區塊式 (Block) 設計。
+    - 當 'CharacterId' 有值時，視為一個新角色的開始 (Header row)。
+    - 隨後的行若 'CharacterId' 為空，則視為該角色的列表資料 (List rows)，例如裝備列表、卡牌列表等。
     """
 
     def __init__(self, data_dir: Path, log: bool = True) -> None:
@@ -129,6 +154,12 @@ class RuntimeInputRepository:
         excel_name: str = "CombatInputPanel.xlsx",
         sheet_name: str = "CombatInputPanel",
     ) -> Dict[str, CharacterLoadoutInput]:
+        """
+        讀取 Excel 並解析所有角色的配置。
+
+        Returns:
+            Dict[character_id, CharacterLoadoutInput]
+        """
         path = self.data_dir / excel_name
         if not path.exists():
             raise FileNotFoundError(f"❌ Input panel not found: {path}")
@@ -172,7 +203,7 @@ class RuntimeInputRepository:
         for _, row in df.iterrows():
             char_id = _norm_cell(row.get("CharacterId"))
 
-            # New block starts when CharacterId has value
+            # 當 CharacterId 有值時，表示一個新角色的區塊開始
             if char_id is not None:
                 flush_current()
 
@@ -195,11 +226,11 @@ class RuntimeInputRepository:
                     note=str(note) if note is not None else None,
                 )
 
-            # List rows belong to current block
+            # 若 CharacterId 為空，則視為當前角色的列表資料 (List rows)
             if current is None:
                 continue
 
-            # Fragment list row
+            # 解析碎片列表 (Fragment list row)
             frag_id = _norm_cell(row.get("FragmentIdList[]"))
             if frag_id is not None:
                 frag_level = _to_float(row.get("FragmentLevelList[]"), 0.0)
@@ -214,22 +245,22 @@ class RuntimeInputRepository:
                     )
                 )
 
-            # Equipment list row
+            # 解析裝備列表 (Equipment list row)
             eq_id = _norm_cell(row.get("EquipmentIdList[]"))
             if eq_id is not None:
                 current.equipment_ids.append(str(eq_id))
 
-            # Card list row
+            # 解析卡牌列表 (Card list row)
             card_id = _norm_cell(row.get("CardList[]"))
             if card_id is not None:
                 current.card_ids.append(str(card_id))
 
-            # CardAwake list row (align by append; optional)
+            # 解析卡牌覺醒列表 (CardAwake list row) - 透過 append 對齊
             awake = _norm_cell(row.get("CardAwakeList[]"))
             if awake is not None:
                 current.card_awake_flags.append(_to_bool(awake, False))
 
-            # Potential node list row
+            # 解析潛能節點列表 (Potential node list row)
             node_id = _norm_cell(row.get("PotentialNodeList[]"))
             if node_id is not None:
                 node_level = _to_float(row.get("PotentialLevelList[]"), 0.0)
@@ -263,17 +294,17 @@ class RuntimeInputRepository:
         ignore_if_bonus_flag_off: bool = False,
     ) -> Dict[str, Any]:
         """
-        Build ability_context for AbilitySystem.
+        建立 AbilitySystem 所需的 context (上下文)。
 
-        Required by current AbilitySystem MVP:
-        - partner_id
-        - partner_stack_count
-        - owner_class
-        - partner_class
-        - extra_ctx (optional)
+        主要負責將 Excel 輸入的夥伴資訊、堆疊層數、職業對照等資訊，
+        轉換為 AbilitySystem 可理解的字典格式。
 
-        character_class_by_id: CharacterId -> Class
-        partner_class_by_id: PartnerId -> Class
+        Args:
+            active_character_id: 當前戰鬥的主要角色 ID
+            inputs_by_character: 從 load_combat_input_panel 載入的輸入資料
+            character_class_by_id: 角色 ID -> 職業對照表
+            partner_class_by_id: 夥伴 ID -> 職業對照表
+            ignore_if_bonus_flag_off: 若 Excel 中 IsPartnerBonusApplied 為 False，是否忽略夥伴加成
         """
         if active_character_id not in inputs_by_character:
             raise KeyError(f"❌ active_character_id not found in input panel: {active_character_id}")
