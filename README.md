@@ -1,134 +1,296 @@
 # CombatCalculatorTest
 
-一個用於 **角色與卡牌數值驗證** 的 Python 靜態戰鬥計算工具。  
-目前專注於 **戰鬥前可確定的數值計算（Phase 1）** 與 **卡牌靜態效果計算（Phase 2）**，作為數值設計與驗證用的輔助工具。
+本專案為一個戰鬥模擬器，用於測試角色、卡牌、怪物以及 Ability（能力）系統在模擬戰鬥流程下的行為。目標是提供可客製化的戰鬥邏輯、事件記錄與報表輸出。
 
 ---
 
-## 🎯 專案目標
+## 專案目標
 
-- 將複雜的數值規則從 Excel 表格中抽離
-- 以 **可重現、可追蹤、可擴充** 的方式驗證數值公式
-- 明確區分「角色基礎數值」與「卡牌效果計算」的責任邊界
-- 作為後續戰鬥模擬（回合制 / 抽牌 / 機率）的基礎
-
----
-
-## 🧱 整體架構概念
-
-本專案採用 **兩階段（Phase-based）計算設計**：
-
-### Phase 1：角色靜態數值（Static Character Stats）
-- 計算所有「戰鬥開始前就能確定」的角色數值
-- 輸出結果為 `CharacterSnapshot`
-- 不涉及卡牌、回合或隨機性
-
-### Phase 2：卡牌靜態效果（Static Card Calculation）
-- 基於 `CharacterSnapshot` 計算卡牌的靜態輸出
-- 僅處理倍率與效果數值
-- 不處理抽牌、回合流程或實際戰鬥模擬
+* 建立可重複執行的戰鬥模擬流程
+* 驗證卡牌、怪物、Partner Ability 等系統互動
+* 提供清楚的戰鬥事件紀錄與報表輸出
+* 作為後續完整戰鬥系統的驗證與原型基礎
 
 ---
 
-## 📁 專案結構
+## 專案結構（概要）
 
-CombatCalculatorTest/
-├─ Data/ # Excel 資料表（數值來源）
-├─ common/ # 共用工具（log、驗證等）
-├─ card_repository.py # 卡牌資料存取層
-├─ combat_static_calculator.py # Phase 1：角色靜態數值計算
-├─ card_static_calculator.py # Phase 2：卡牌靜態效果計算
-├─ models.py # 資料結構定義（dataclass）
-├─ main.py # 程式進入點
-├─ .gitignore
-└─ README.md
-
-
-
----
-
-## 📄 檔案用途說明
-
-### `Data/`
-- 存放所有 Excel 資料表
-- 作為數值的「單一來源（Source of Truth）」
-- 不包含任何運算邏輯
+```
+.
+├── ability_models.py
+├── ability_system.py
+├── battle_simulator.py
+├── battle_reporter.py
+├── card_repository.py
+├── card_static_calculator.py
+├── combat_static_calculator.py
+├── main.py
+├── models.py
+├── monster_repository.py
+├── runtime_input_repository.py
+├── Data/            # Excel 資料來源
+├── Reports/         # 戰鬥輸出報表
+└── README.md
+```
 
 ---
 
-### `common/`
-- 共用工具與輔助模組
-- 預期包含：
-  - logging
-  - 資料 schema 驗證
-  - 輔助工具函式
-- 不應依賴任何戰鬥或卡牌邏輯
+## 執行環境需求
+
+* Python 3.10+
+* 套件需求：
+
+```bash
+pip install pandas openpyxl
+```
 
 ---
 
-### `models.py`
-- 定義跨模組傳遞的資料結構（dataclass）
-- 目前核心結構：
-  - `CharacterSnapshot`：  
-    Phase 1 的輸出，代表角色的靜態最終數值
-- 設計原則：
-  - 僅負責資料結構定義
-  - 不放計算邏輯
+## 資料來源（Data Folder）
+
+請確保 `Data/` 目錄下包含以下 Excel 檔案：
+
+* `Card.xlsx`：卡牌資料與效果
+* `Character.xlsx`：角色基礎數值
+* `Monster.xlsx`：怪物資料
+* `Partner.xlsx`：Partner 與 Ability 資料（若有）
+* `CombatInputPanel.xlsx`：模擬輸入參數
 
 ---
 
-### `card_repository.py`
-- 卡牌資料存取層（Repository Pattern）
-- 負責：
-  - 讀取卡牌相關 Excel
-  - 整理欄位與索引
-  - 提供查詢介面給計算模組
-- 不負責任何卡牌公式
+## 快速開始
 
----
-
-### `combat_static_calculator.py`
-- **Phase 1 核心模組**
-- 聚合角色所有靜態數值來源（目前版本不含潛力）
-- 輸出：
-  - `CharacterSnapshot`
-- 設計定位：
-  - Phase 1 的 Orchestrator
-  - 為所有後續計算提供穩定基底
-
----
-
-### `card_static_calculator.py`
-- **Phase 2 模組**
-- 根據：
-  - `CharacterSnapshot`
-  - 卡牌靜態參數
-- 計算卡牌的靜態效果或倍率結果
-- 不處理：
-  - 抽牌
-  - 回合
-  - 隨機性
-
----
-
-### `main.py`
-- 程式進入點（Entry Point）
-- 負責：
-  - 組合流程
-  - 呼叫 Phase 1 / Phase 2
-  - 控制輸出與測試案例
-- 不包含任何數值公式
-
----
-
-## ▶️ 使用方式（概念）
+在專案根目錄執行：
 
 ```bash
 python main.py
+```
 
-可在 main.py 中指定測試角色與卡牌
+執行後將：
 
-執行後會印出或記錄：
-Phase 1 的角色靜態數值
-Phase 2 的卡牌靜態計算結果
-（實際輸出內容依目前測試實作為準）
+1. 載入靜態角色與卡牌資料
+2. 建立 Ability System
+3. 依輸入設定重複模擬戰鬥
+4. 將結果輸出至 `Reports/`
+
+---
+
+## 戰鬥模擬流程總覽
+
+戰鬥模擬大致流程如下：
+
+1. Phase 1：角色靜態計算（Character Snapshot）
+2. Phase 2：戰鬥模擬（Turn-based）
+3. Ability 於指定 Trigger Event 觸發
+4. Card / Monster 行為執行
+5. 勝敗判定與結果輸出
+
+---
+
+## Ability 系統說明
+
+### Ability 定義（ability_models.py）
+
+Ability 系統由「觸發時機、條件、效果」三層結構組成。
+
+#### 核心結構
+
+* `AbilityDef`
+
+  * ability_id
+  * trigger_event
+  * priority
+  * condition_groups
+  * effect_groups
+
+* `TriggerEvent`
+
+  * BattleStart
+  * FirstTurnStart
+  * TurnStart
+  * TurnEnd
+
+---
+
+### Condition 系統
+
+* `ConditionGroupDef`
+
+  * group_logic：AND / OR
+  * rows：ConditionRowDef[]
+
+* `ConditionRowDef`
+
+  * condition_type
+  * params
+
+目前範例支援的 Condition 包含：
+
+* `OwnerClassEqualsPartnerClass`
+
+Condition 會在 Ability 觸發時被評估，若成立才會進入 Effect 階段。
+
+---
+
+### Effect 系統
+
+* `EffectGroupDef`
+
+  * rows：EffectRowDef[]
+
+* `EffectRowDef`
+
+  * effect_type
+  * params
+
+Effect 用於實際修改戰鬥狀態，例如：
+
+* 新增 Status
+* 設定狀態參數
+* 寫入 runtime_mod（供戰鬥計算使用）
+
+---
+
+## Ability 執行引擎（ability_system.py）
+
+`AbilitySystem` 負責在戰鬥流程中執行 Ability：
+
+```text
+AbilitySystem.on_trigger(
+    trigger_event,
+    battle_index,
+    turn,
+    ctx,
+    emit
+)
+```
+
+執行流程：
+
+1. 找出符合 TriggerEvent 的 Ability
+2. 依 priority 排序
+3. 評估 Condition Groups
+4. 執行 Effect Groups
+5. 將結果寫入 ctx.runtime_mod
+
+---
+
+## 戰鬥模擬器（battle_simulator.py）
+
+負責整體戰鬥流程：
+
+* 玩家階段
+
+  * 抽牌
+  * 出牌
+  * 卡牌效果結算
+
+* 怪物階段
+
+  * Counter 判斷
+  * 行為執行
+
+* Turn 與 Battle 結束判定
+
+Ability Trigger（如 FirstTurnStart）會在對應時機呼叫 AbilitySystem。
+
+---
+
+## Battle Reporter（battle_reporter.py）
+
+負責紀錄與輸出戰鬥結果：
+
+* 戰鬥摘要
+* 回合事件
+* 能力觸發紀錄
+
+輸出位置：
+
+```
+Reports/
+```
+
+---
+
+## Repository 類模組
+
+### Card Repository
+
+* `card_repository.py`
+* `card_static_calculator.py`
+
+用途：
+
+* 讀取卡牌資料
+* 建立卡牌靜態數值
+* 提供戰鬥中使用的卡牌物件
+
+---
+
+### Monster Repository
+
+* `monster_repository.py`
+
+用途：
+
+* 載入怪物資料
+* 提供怪物行為與數值
+
+---
+
+## Runtime Input
+
+`runtime_input_repository.py` 負責讀取模擬時的輸入參數，例如：
+
+* 模擬次數
+* 指定角色 / Partner
+* 測試用開關
+
+---
+
+## MVP Ability 範例（Douglas）
+
+目前內建一個最小可行 Ability 範例：
+
+* Partner：Douglas
+* Trigger：FirstTurnStart
+* Condition：OwnerClass == PartnerClass
+* Effect：
+
+  * 新增 AttackUp 狀態
+  * 持續 1 回合
+  * 加成數值依 Partner Stack Curve 計算
+
+此範例主要用於驗證 Ability 系統的完整流程。
+
+---
+
+## 擴充方向建議
+
+* Ability / Condition / Effect 改由 Excel 驅動
+* 新增更多 TriggerEvent
+* Ability 與卡牌、怪物深度互動
+* 擴充 Status 與數值疊加規則
+
+---
+
+## 常見問題
+
+### 如何新增 Ability 觸發時機？
+
+1. 在 `TriggerEvent` Enum 新增項目
+2. 在戰鬥流程對應時機呼叫 `AbilitySystem.on_trigger`
+
+---
+
+### Ability 如何影響傷害計算？
+
+Ability Effect 可寫入 `ctx.runtime_mod`，戰鬥傷害計算階段會讀取該資料並套用加成。
+
+---
+
+## 備註
+
+本專案目前為實驗與原型用途，架構設計以可讀性與擴充性為優先。
+
+後續可逐步演進為完整戰鬥核心系統。
