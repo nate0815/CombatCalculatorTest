@@ -76,10 +76,8 @@ def apply_damage(hp: float, shield: float, dmg: float) -> Tuple[float, float]:
         used = min(shield, remaining)
         shield -= used
         remaining -= used
-
     if remaining > 0:
         hp -= remaining
-
     return max(0.0, hp), max(0.0, shield)
 
 
@@ -101,16 +99,22 @@ class BattleSimulator:
     - 隊伍共用護盾池 (PlayerPartySnapshot.team_shield)
     - AP 系統 (最大 AP=3)，每張卡牌依 Card.ap_cost 消耗
     - 抽牌/棄牌/洗牌:
-        1) 初始全部卡牌進 Draw Pile
-        2) 玩家回合開始抽 hand_size 張
-        3) 每次出牌：先看 AP -> 找出手牌中可出卡 -> 隨機挑 1 張打出
-        4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
-        5) 回合結束：手牌剩餘全部丟棄牌堆
-        6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
+      1) 初始全部卡牌進 Draw Pile
+      2) 玩家回合開始抽 hand_size 張
+      3) 每次出牌：先看 AP -> 找出手牌中可出卡 -> 隨機挑 1 張打出
+      4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
+      5) 回合結束：手牌剩餘全部丟棄牌堆
+      6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
     - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
     - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
-    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
-    - 重置時機 (AfterEnemyAttackPhase): 怪物本回合行動後，於敵方階段結束時重置計數器
+    - 敵方階段規則 (ActIfNotActedThisTurn):
+      若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
+    - 重置時機 (AfterEnemyAttackPhase):
+      怪物本回合行動後，於敵方階段結束時重置計數器
+
+    ★ 新增 Ability Hook：
+    - Turn1 開始時觸發 FirstTurnStart（道格拉斯：每場戰鬥只在第一回合觸發）
+    - AbilitySystem 透過 ctx["runtime_mod"]["player_damage_multiplier"] 影響本回合出牌傷害
     """
 
     def __init__(self, config: BattleConfig, reporter: BattleReporter) -> None:
@@ -131,6 +135,8 @@ class BattleSimulator:
         monster_indexes: List[MonsterIndex],
         monster_base_stats: Dict[str, MonsterBaseStat],
         monster_skills: List[MonsterSkill],
+        ability_system: Optional[Any] = None,
+        ability_context: Optional[Dict[str, Any]] = None,
     ) -> List[BattleResult]:
         results: List[BattleResult] = []
         for i in range(1, battle_count + 1):
@@ -146,6 +152,8 @@ class BattleSimulator:
                 monster_indexes=monster_indexes,
                 monster_base_stats=monster_base_stats,
                 monster_skills=monster_skills,
+                ability_system=ability_system,
+                ability_context=ability_context,
             )
             results.append(res)
         return results
@@ -159,7 +167,11 @@ class BattleSimulator:
         monster_indexes: List[MonsterIndex],
         monster_base_stats: Dict[str, MonsterBaseStat],
         monster_skills: List[MonsterSkill],
+        ability_system: Optional[Any] = None,
+        ability_context: Optional[Dict[str, Any]] = None,
     ) -> BattleResult:
+        ability_context = ability_context or {}
+
         # --------------------------
         # Init party runtime state
         # 初始化隊伍執行時狀態
@@ -178,6 +190,7 @@ class BattleSimulator:
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for sk in monster_skills:
             skills_by_monster.setdefault(sk.monster_id, []).append(sk)
+
         for mid in skills_by_monster:
             # 讓技能順序可預期
             skills_by_monster[mid].sort(key=lambda s: s.skill_id)
@@ -212,7 +225,6 @@ class BattleSimulator:
         draw_pile: List[Card] = list(party_cards)
         discard_pile: List[Card] = []
         hand: List[Card] = []
-
         self._rng.shuffle(draw_pile)
 
         # --------------------------
@@ -296,6 +308,49 @@ class BattleSimulator:
                 f"--- Turn {turn} Start --- (AP={ap}, Hand={len(hand)}, Draw={len(draw_pile)}, Discard={len(discard_pile)})",
             )
 
+            # -------------------------------------------------
+            # Ability runtime modifiers (per-turn)
+            # -------------------------------------------------
+            runtime_mod: Dict[str, Any] = {
+                "player_damage_multiplier": 1.0,
+            }
+
+            # Douglas: 每場戰鬥只在第一回合觸發 -> FirstTurnStart
+            if turn == 1 and ability_system is not None:
+                ctx = {
+                    "party": party_runtime,
+                    "active_member": active_member,
+                    "monsters": monsters,
+
+                    # Required by AbilitySystem MVP
+                    "partner_id": ability_context.get("partner_id"),
+                    "owner_class": ability_context.get("owner_class"),
+                    "partner_class": ability_context.get("partner_class"),
+                    "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
+
+                    # Engine will mutate this in-place
+                    "runtime_mod": runtime_mod,
+                }
+                # Also allow engine to use extra fields later
+                ctx.update(ability_context.get("extra_ctx", {}))
+
+                try:
+                    ability_system.on_trigger(
+                        trigger_event="FirstTurnStart",
+                        battle_index=battle_index,
+                        turn=turn,
+                        ctx=ctx,
+                        emit=self._print_and_record_system,
+                    )
+                except Exception as e:
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        "System",
+                        "AbilityError",
+                        f"[AbilityError] {type(e).__name__}: {e}",
+                    )
+
             # 玩家出牌迴圈：先看 AP -> 篩可出 -> 隨機挑 1 張出
             while ap > 0:
                 playable = [c for c in hand if int(getattr(c, "ap_cost", 1)) <= ap]
@@ -334,6 +389,7 @@ class BattleSimulator:
                         active_member_id=active_member.character_id,
                         effect=ef,
                         monsters=monsters,
+                        runtime_mod=runtime_mod,
                     )
 
                 # 玩家出任意卡牌 -> tick counters
@@ -414,11 +470,7 @@ class BattleSimulator:
                 if sk.reload_timing == ReloadTiming.AfterEnemyAttackPhase:
                     st.counter = int(st.counter_max)
                     self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        mi.monster_id,
-                        "Reload",
-                        f"[Reload] counter reset to {st.counter}",
+                        battle_index, turn, mi.monster_id, "Reload", f"[Reload] counter reset to {st.counter}"
                     )
 
             winner = self._get_winner(party_runtime, monsters)
@@ -442,11 +494,10 @@ class BattleSimulator:
         active_member_id: str,
         effect: CardEffect,
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
+        runtime_mod: Optional[Dict[str, Any]] = None,
     ) -> None:
         # Value = base(stat)*multiplier + flat_value
         if effect.scale_stat == ScaleStat.ATK:
-            base_value = party.get_active_member().final_atk if party.active_character_id == active_member_id else party.get_active_member().final_atk
-            base_value = party.get_active_member().final_atk if party.get_active_member().character_id == active_member_id else party.get_active_member().final_atk
             base_value = party.get_active_member().final_atk
         elif effect.scale_stat == ScaleStat.DEF:
             base_value = party.get_active_member().final_def
@@ -457,6 +508,12 @@ class BattleSimulator:
             base_value = 0.0
 
         value = float(base_value) * float(effect.multiplier) + float(effect.flat_value)
+
+        # Ability runtime modifier: outgoing damage multiplier
+        if effect.effect_type == EffectType.Damage and runtime_mod is not None:
+            mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
+            if mul != 1.0:
+                value *= mul
 
         if effect.effect_type == EffectType.Damage:
             if effect.target == TargetType.EnemyAll:
@@ -536,11 +593,7 @@ class BattleSimulator:
             before = st.counter
             st.counter = max(0, int(st.counter) - 1)
             self._print_and_record_system(
-                battle_index,
-                turn,
-                mi.monster_id,
-                "CounterTick",
-                f"[Counter] {before} -> {st.counter}",
+                battle_index, turn, mi.monster_id, "CounterTick", f"[Counter] {before} -> {st.counter}"
             )
 
             # Reaction: counter==0 and not acted => act immediately
@@ -629,7 +682,6 @@ class BattleSimulator:
     ) -> None:
         self.log.info(message)
 
-        # Reporter event log is optional (enable_event_log=False by default)
         payload: Dict[str, Any] = {
             "battle_index": battle_index,
             "turn": turn,
