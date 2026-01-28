@@ -9,6 +9,47 @@ from typing import Dict, Optional
 # =========================================================
 # Enums
 # =========================================================
+class ApplyPhase(str, Enum):
+    """
+    Where this rule is applied.
+
+    - PRE_BATTLE: applied once when building/initializing battle context.
+    - RUNTIME: applied during battle by triggers (e.g., FirstTurnStart).
+    """
+    PRE_BATTLE = "PRE_BATTLE"
+    RUNTIME = "RUNTIME"
+
+
+class SourceType(str, Enum):
+    """
+    Where the ability comes from. (For now you mainly use Partner.)
+    """
+    Partner = "Partner"
+    Character = "Character"
+    Equipment = "Equipment"
+    Card = "Card"
+    Monster = "Monster"
+
+
+class TargetScope(str, Enum):
+    """
+    Target scope for effects. (Optional for now; future-proofing)
+    """
+    Owner = "Owner"
+    Party = "Party"
+    Enemy = "Enemy"
+    AllEnemies = "AllEnemies"
+
+
+class DurationType(str, Enum):
+    """
+    Optional duration semantics for effects/status.
+    """
+    Instant = "Instant"
+    TurnCount = "TurnCount"
+    Permanent = "Permanent"
+
+
 class TriggerEvent(str, Enum):
     BattleStart = "BattleStart"
     FirstTurnStart = "FirstTurnStart"
@@ -64,6 +105,11 @@ class AbilityDef:
     effect_group_id: str
     priority: int = 0
 
+    # NEW (from your updated sheets)
+    apply_phase: ApplyPhase = ApplyPhase.RUNTIME
+    source_type: Optional[SourceType] = None
+    enabled: bool = True
+
 
 @dataclass(frozen=True)
 class ConditionGroupDef:
@@ -76,9 +122,12 @@ class ConditionRowDef:
     condition_group_id: str
     row_index: int
     condition_type: ConditionType
-    # 先保留擴充欄位（之後你要做 target / compare / param 都用得到）
+
+    # NEW: support Param1~Param4 (future-proof)
     arg1: Optional[str] = None
     arg2: Optional[str] = None
+    arg3: Optional[str] = None
+    arg4: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -94,18 +143,23 @@ class EffectRowDef:
     effect_type: AbilityEffectType
 
     # 用於 AddStatus:
-    #   value1 = StatusType
-    #   value2 = duration_turn
+    # value1 = StatusType
+    # value2 = duration_turn (int)
     #
     # 用於 SetStatusParam:
-    #   value1 = param_key
-    #   value2 = const_value（若使用 ValueRefType 則可為 None）
+    # value1 = param_key
+    # value2 = const_value（若使用 ValueRefType 則可為 None）
     value1: Optional[str] = None
     value2: Optional[float] = None
 
     # Dynamic value reference
     value_ref_type: ValueRefType = ValueRefType.None_
     value_ref_id: Optional[str] = None
+
+    # NEW: optional target/duration metadata (can be ignored by runtime for now)
+    target_scope: Optional[TargetScope] = None
+    duration_type: Optional[DurationType] = None
+    duration_value: Optional[int] = None
 
 
 @dataclass

@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ability_models import (
     AbilityDef,
     AbilityEffectType,
+    ApplyPhase,
     ConditionGroupDef,
     ConditionLogic,
     ConditionRowDef,
@@ -54,6 +55,7 @@ class AbilitySystem:
         self.partner_stack_curves = partner_stack_curves
         self.default_max_partner_stack = int(default_max_partner_stack)
 
+        # (battle_index, ability_id) -> proc_count
         self._proc_counter: Dict[Tuple[int, str], int] = {}
 
     # =========================================================
@@ -67,11 +69,13 @@ class AbilitySystem:
         ctx: Dict[str, Any],
         emit: Optional[EmitFn] = None,
     ) -> None:
+        # 1) parse trigger
         try:
             trig = TriggerEvent(str(trigger_event))
         except Exception:
             return
 
+        # 2) get partner bound abilities
         partner_id = ctx.get("partner_id")
         if not partner_id:
             return
@@ -80,15 +84,33 @@ class AbilitySystem:
         if not ability_ids:
             return
 
+        # 3) filter abilities by:
+        # - exists
+        # - enabled
+        # - apply_phase == RUNTIME
+        # - trigger_event match
         defs: List[AbilityDef] = []
         for aid in ability_ids:
             ad = self.abilities.get(str(aid))
-            if ad and ad.trigger_event == trig:
+            if not ad:
+                continue
+
+            # NEW: enabled check
+            if hasattr(ad, "enabled") and not bool(ad.enabled):
+                continue
+
+            # NEW: apply_phase check (default is RUNTIME)
+            ap = getattr(ad, "apply_phase", ApplyPhase.RUNTIME)
+            if ap != ApplyPhase.RUNTIME:
+                continue
+
+            if ad.trigger_event == trig:
                 defs.append(ad)
 
         if not defs:
             return
 
+        # stable priority execution
         defs.sort(key=lambda x: int(getattr(x, "priority", 0)))
 
         for ad in defs:
@@ -129,11 +151,11 @@ class AbilitySystem:
         g = self.condition_groups.get(gid)
         rows = self.condition_rows_by_group.get(gid, [])
 
+        # NOTE: MVP 取向：缺 group 或 rows 時，視為通過（避免資料缺漏導致整體不能跑）
         if not g or not rows:
             return True, "EmptyOrMissingConditionGroup"
 
         logic = g.logic
-
         results = [self._eval_condition_row(r, ctx) for r in rows]
 
         if logic == ConditionLogic.AND:
@@ -142,6 +164,7 @@ class AbilitySystem:
                     return False, reason
             return True, "AND:AllPass"
 
+        # OR
         for ok, _ in results:
             if ok:
                 return True, "OR:OnePass"
@@ -155,7 +178,9 @@ class AbilitySystem:
             pc = ctx.get("partner_class")
             if oc is None or pc is None:
                 return False, "ClassMissing"
-            return (str(oc) == str(pc)), "ClassMatch" if str(oc) == str(pc) else "ClassMismatch"
+            if str(oc) == str(pc):
+                return True, "ClassMatch"
+            return False, "ClassMismatch"
 
         return False, f"UnsupportedConditionType({row.condition_type.value})"
 
@@ -181,6 +206,7 @@ class AbilitySystem:
             if r.effect_type == AbilityEffectType.AddStatus:
                 stype = StatusType(str(r.value1))
                 duration = int(r.value2 or 0)
+
                 current_status = StatusInstance(
                     status_type=stype,
                     remaining_turns=duration,
@@ -194,10 +220,24 @@ class AbilitySystem:
                 key = str(r.value1)
                 val = self._resolve_value(r, ctx)
                 current_status.params[key] = float(val)
+
+                # MVP: 立刻把 status 影響寫進 runtime_mod（目前只做 AttackUp）
                 self._apply_status_to_runtime_mod(current_status, ctx)
+                continue
+
+            # 未支援的 effect type：忽略（MVP）
+            self._emit(
+                emit,
+                battle_index,
+                turn,
+                "Ability",
+                "EffectSkip",
+                f"[Ability] skip unsupported effect_type={r.effect_type.value}",
+            )
 
     def _apply_status_to_runtime_mod(self, status: StatusInstance, ctx: Dict[str, Any]) -> None:
         runtime_mod = ctx.setdefault("runtime_mod", {})
+
         if status.status_type == StatusType.AttackUp:
             inc = float(status.params.get(StatusParamKey.increase.value, 0.0))
             cur = float(runtime_mod.get("player_damage_multiplier", 1.0))
@@ -223,6 +263,7 @@ class AbilitySystem:
         values = curves.get(curve_id)
         if not values:
             return 0.0
+
         max_stack = min(len(values) - 1, self.default_max_partner_stack)
         s = max(0, min(int(stack), int(max_stack)))
         return float(values[s])

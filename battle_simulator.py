@@ -31,9 +31,8 @@ from models import (
 class BattleConfig:
     ap_max: int = 3
     max_turns: int = 999
-    log_level: LogLevel = LogLevel.INFO
+    log_level: LogLevel = LogLevel.INFO  # kept for backward compatibility with main.py
 
-    # kept for backward compatibility with main.py
     # 舊版語意：當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段
     # 新版抽手牌邏輯下：我們會改成「沒有可出的牌就結束玩家階段」
     stop_when_insufficient_ap: bool = True
@@ -76,8 +75,10 @@ def apply_damage(hp: float, shield: float, dmg: float) -> Tuple[float, float]:
         used = min(shield, remaining)
         shield -= used
         remaining -= used
+
     if remaining > 0:
         hp -= remaining
+
     return max(0.0, hp), max(0.0, shield)
 
 
@@ -87,6 +88,7 @@ def pick_enemy_single(
     alive = [(mi, ms, st) for (mi, ms, st) in monsters if st.hp > 0]
     if not alive:
         return None
+
     # Highest weight first, stable by monster_id
     alive.sort(key=lambda x: (-x[0].monster_weight, x[0].monster_id))
     return alive[0]
@@ -98,6 +100,7 @@ class BattleSimulator:
     - 隊伍共用血條 (PlayerPartySnapshot.team_hp / team_hp_max)
     - 隊伍共用護盾池 (PlayerPartySnapshot.team_shield)
     - AP 系統 (最大 AP=3)，每張卡牌依 Card.ap_cost 消耗
+
     - 抽牌/棄牌/洗牌:
       1) 初始全部卡牌進 Draw Pile
       2) 玩家回合開始抽 hand_size 張
@@ -105,15 +108,14 @@ class BattleSimulator:
       4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
       5) 回合結束：手牌剩餘全部丟棄牌堆
       6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
+
     - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
     - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
-    - 敵方階段規則 (ActIfNotActedThisTurn):
-      若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
-    - 重置時機 (AfterEnemyAttackPhase):
-      怪物本回合行動後，於敵方階段結束時重置計數器
+    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
+    - 重置時機 (AfterEnemyAttackPhase): 怪物本回合行動後，於敵方階段結束時重置計數器
 
-    ★ 新增 Ability Hook：
-    - Turn1 開始時觸發 FirstTurnStart（道格拉斯：每場戰鬥只在第一回合觸發）
+    ★ Ability Hook：
+    - Turn1 開始時觸發 FirstTurnStart（每場戰鬥只在第一回合觸發）
     - AbilitySystem 透過 ctx["runtime_mod"]["player_damage_multiplier"] 影響本回合出牌傷害
     """
 
@@ -156,6 +158,7 @@ class BattleSimulator:
                 ability_context=ability_context,
             )
             results.append(res)
+
         return results
 
     def run_single(
@@ -174,7 +177,6 @@ class BattleSimulator:
 
         # --------------------------
         # Init party runtime state
-        # 初始化隊伍執行時狀態
         # --------------------------
         party_runtime = PlayerPartySnapshot(
             members=party.members,
@@ -185,7 +187,6 @@ class BattleSimulator:
 
         # --------------------------
         # Build monsters runtime
-        # 建立怪物執行時狀態
         # --------------------------
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for sk in monster_skills:
@@ -220,7 +221,6 @@ class BattleSimulator:
 
         # --------------------------
         # Deck runtime state
-        # 抽牌/棄牌/洗牌：runtime 狀態
         # --------------------------
         draw_pile: List[Card] = list(party_cards)
         discard_pile: List[Card] = []
@@ -229,7 +229,6 @@ class BattleSimulator:
 
         # --------------------------
         # Init logs
-        # 初始化日誌
         # --------------------------
         self._print_and_record_system(
             battle_index, 0, "System", "BattleStart", f"=== Battle {battle_index} Start ==="
@@ -247,8 +246,9 @@ class BattleSimulator:
             0,
             "System",
             "InitEnemies",
-            "[Init] Enemies="
-            + ", ".join([f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]),
+            "[Init] Enemies=" + ", ".join(
+                [f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]
+            ),
         )
 
         def draw_cards(turn: int, n: int) -> None:
@@ -277,8 +277,8 @@ class BattleSimulator:
         turn = 0
         while True:
             turn += 1
+
             if turn > self.config.max_turns:
-                # 超過回合上限：以目前狀態返回
                 return BattleResult(
                     battle_index=battle_index,
                     winner="Enemy" if party_runtime.team_hp <= 0 else "Player",
@@ -299,7 +299,6 @@ class BattleSimulator:
             # 回合開始抽手牌
             hand.clear()
             draw_cards(turn, int(self.config.hand_size))
-
             self._print_and_record_system(
                 battle_index,
                 turn,
@@ -314,22 +313,31 @@ class BattleSimulator:
             runtime_mod: Dict[str, Any] = {
                 "player_damage_multiplier": 1.0,
             }
+            statuses: List[Any] = []
 
             # Douglas: 每場戰鬥只在第一回合觸發 -> FirstTurnStart
             if turn == 1 and ability_system is not None:
+                # NEW: pre-trigger snapshot for debug
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    "System",
+                    "AbilityBefore",
+                    f"[Ability] Before trigger: player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)}",
+                )
+
                 ctx = {
                     "party": party_runtime,
                     "active_member": active_member,
                     "monsters": monsters,
-
                     # Required by AbilitySystem MVP
                     "partner_id": ability_context.get("partner_id"),
                     "owner_class": ability_context.get("owner_class"),
                     "partner_class": ability_context.get("partner_class"),
                     "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
-
-                    # Engine will mutate this in-place
+                    # Engine will mutate these in-place
                     "runtime_mod": runtime_mod,
+                    "statuses": statuses,
                 }
                 # Also allow engine to use extra fields later
                 ctx.update(ability_context.get("extra_ctx", {}))
@@ -350,6 +358,16 @@ class BattleSimulator:
                         "AbilityError",
                         f"[AbilityError] {type(e).__name__}: {e}",
                     )
+
+                # NEW: post-trigger snapshot for debug
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    "System",
+                    "AbilityAfter",
+                    f"[Ability] After trigger: player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
+                    f"(statuses={len(statuses)})",
+                )
 
             # 玩家出牌迴圈：先看 AP -> 篩可出 -> 隨機挑 1 張出
             while ap > 0:
@@ -423,7 +441,6 @@ class BattleSimulator:
             for (mi, base, st) in monsters:
                 if st.hp <= 0:
                     continue
-
                 sk_list = skills_by_monster.get(mi.monster_id, [])
                 if not sk_list:
                     continue
@@ -443,15 +460,15 @@ class BattleSimulator:
                             reason="EnemyPhase",
                         )
 
-                winner = self._get_winner(party_runtime, monsters)
-                if winner is not None:
-                    return BattleResult(
-                        battle_index=battle_index,
-                        winner=winner,
-                        turns=turn,
-                        player_hp_end=float(party_runtime.team_hp),
-                        enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
-                    )
+                        winner = self._get_winner(party_runtime, monsters)
+                        if winner is not None:
+                            return BattleResult(
+                                battle_index=battle_index,
+                                winner=winner,
+                                turns=turn,
+                                player_hp_end=float(party_runtime.team_hp),
+                                enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
+                            )
 
             # =========================
             # End of Turn: Reload (AfterEnemyAttackPhase)
@@ -461,7 +478,6 @@ class BattleSimulator:
                     continue
                 if not st.has_acted_this_turn:
                     continue
-
                 sk_list = skills_by_monster.get(mi.monster_id, [])
                 if not sk_list:
                     continue
@@ -513,6 +529,14 @@ class BattleSimulator:
         if effect.effect_type == EffectType.Damage and runtime_mod is not None:
             mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
             if mul != 1.0:
+                # NEW: add a trace log to confirm multiplier applied
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    "System",
+                    "AbilityMul",
+                    f"[Ability] Apply player_damage_multiplier={mul} to damage value",
+                )
                 value *= mul
 
         if effect.effect_type == EffectType.Damage:
@@ -529,6 +553,7 @@ class BattleSimulator:
                         "Damage",
                         f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} Shield {old_sh:.1f}->{st.shield:.1f}",
                     )
+
             elif effect.target == TargetType.EnemySingle:
                 picked = pick_enemy_single(monsters)
                 if picked is not None:
@@ -579,7 +604,6 @@ class BattleSimulator:
         for (mi, base, st) in monsters:
             if st.hp <= 0:
                 continue
-
             sk_list = skills_by_monster.get(mi.monster_id, [])
             if not sk_list:
                 continue
@@ -622,7 +646,6 @@ class BattleSimulator:
     ) -> None:
         if monster_state.hp <= 0:
             return
-
         sk_list = skills_by_monster.get(monster_index.monster_id, [])
         if not sk_list:
             return
@@ -681,7 +704,6 @@ class BattleSimulator:
         message: str,
     ) -> None:
         self.log.info(message)
-
         payload: Dict[str, Any] = {
             "battle_index": battle_index,
             "turn": turn,

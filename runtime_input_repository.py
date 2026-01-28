@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -13,11 +13,19 @@ import pandas as pd
 # ----------------------------
 def _norm_cell(v: Any) -> Optional[Any]:
     """
-    標準化 Excel 儲存格的值。
-    將 None, "None", 空字串統一視為 None，方便後續處理。
+    標準化 Excel 儲存格的值：
+    - None / NaN / "" / "None" -> None
+    - 其他字串 -> strip
     """
     if v is None:
         return None
+    # pandas NaN
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return None
+    except Exception:
+        pass
+
     if isinstance(v, str):
         s = v.strip()
         if s == "" or s.lower() == "none":
@@ -27,7 +35,6 @@ def _norm_cell(v: Any) -> Optional[Any]:
 
 
 def _to_int(v: Any, default: int = 0) -> int:
-    """嘗試將值轉換為整數，若失敗則回傳預設值。"""
     v = _norm_cell(v)
     if v is None:
         return default
@@ -38,7 +45,6 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
-    """嘗試將值轉換為浮點數，若失敗則回傳預設值。"""
     v = _norm_cell(v)
     if v is None:
         return default
@@ -48,39 +54,36 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
-def _to_bool(v, default: bool = False) -> bool:
+def _to_bool(v: Any, default: bool = False) -> bool:
     """
     嘗試將值轉換為布林值。
     支援字串 ("true", "yes", "1") 與數值 (1/0) 的判斷。
     """
-    # None / NaN / empty -> default
-    try:
-        import pandas as pd
-        if v is None or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
-            return default
-    except Exception:
-        # if pandas not available or pd.isna fails, fallback checks
-        if v is None:
-            return default
+    v = _norm_cell(v)
+    if v is None:
+        return default
 
-    # already bool
     if isinstance(v, bool):
         return v
 
-    # numeric-like
     if isinstance(v, (int, float)):
-        return bool(int(v))
+        try:
+            return bool(int(v))
+        except Exception:
+            return default
 
-    # string-like
     s = str(v).strip().lower()
     if s in ("true", "t", "yes", "y", "1"):
         return True
-    if s in ("false", "f", "no", "n", "0", "", "none", "nan"):
+    if s in ("false", "f", "no", "n", "0", "none", "nan", ""):
         return False
-
-    # unknown -> default
     return default
 
+
+def _require_columns(df: pd.DataFrame, required_cols: List[str]) -> None:
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"CombatInputPanel missing columns: {missing}")
 
 
 # ----------------------------
@@ -88,10 +91,6 @@ def _to_bool(v, default: bool = False) -> bool:
 # ----------------------------
 @dataclass
 class FragmentInput:
-    """
-    碎片 (Fragment) 輸入資料結構。
-    對應 Excel 中的 FragmentIdList, FragmentLevelList 等欄位。
-    """
     fragment_id: str
     level: float = 0.0
     random_stat: Optional[str] = None
@@ -100,19 +99,12 @@ class FragmentInput:
 
 @dataclass
 class PotentialNodeInput:
-    """
-    潛能節點 (Potential Node) 輸入資料結構。
-    """
     node_id: str
     level: float = 0.0
 
 
 @dataclass
 class CharacterLoadoutInput:
-    """
-    單一角色的完整戰鬥配置輸入。
-    包含等級、夥伴、好感度，以及列表式的裝備、卡牌、碎片、潛能等資訊。
-    """
     character_id: str
     level: float
 
@@ -139,10 +131,9 @@ class RuntimeInputRepository:
     """
     負責讀取 CombatInputPanel.xlsx 並解析為結構化資料。
 
-    Excel 格式說明：
-    - 採用區塊式 (Block) 設計。
-    - 當 'CharacterId' 有值時，視為一個新角色的開始 (Header row)。
-    - 隨後的行若 'CharacterId' 為空，則視為該角色的列表資料 (List rows)，例如裝備列表、卡牌列表等。
+    Excel 格式（Block 設計）：
+    - 當 'CharacterId' 有值時，視為一個新角色的開始 (Header row)
+    - 隨後 'CharacterId' 空白的行視為該角色的列表資料 (List rows)
     """
 
     def __init__(self, data_dir: Path, log: bool = True) -> None:
@@ -155,14 +146,12 @@ class RuntimeInputRepository:
         sheet_name: str = "CombatInputPanel",
     ) -> Dict[str, CharacterLoadoutInput]:
         """
-        讀取 Excel 並解析所有角色的配置。
-
         Returns:
             Dict[character_id, CharacterLoadoutInput]
         """
         path = self.data_dir / excel_name
         if not path.exists():
-            raise FileNotFoundError(f"❌ Input panel not found: {path}")
+            raise FileNotFoundError(f"Input panel not found: {path}")
 
         df = pd.read_excel(path, sheet_name=sheet_name)
         df.columns = df.columns.astype(str).str.strip()
@@ -186,9 +175,7 @@ class RuntimeInputRepository:
             "PotentialLevelList[]",
             "Note",
         ]
-        missing = [c for c in required_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"❌ CombatInputPanel missing columns: {missing}")
+        _require_columns(df, required_cols)
 
         inputs: Dict[str, CharacterLoadoutInput] = {}
         current: Optional[CharacterLoadoutInput] = None
@@ -203,7 +190,7 @@ class RuntimeInputRepository:
         for _, row in df.iterrows():
             char_id = _norm_cell(row.get("CharacterId"))
 
-            # 當 CharacterId 有值時，表示一個新角色的區塊開始
+            # Header row: new character block
             if char_id is not None:
                 flush_current()
 
@@ -226,11 +213,11 @@ class RuntimeInputRepository:
                     note=str(note) if note is not None else None,
                 )
 
-            # 若 CharacterId 為空，則視為當前角色的列表資料 (List rows)
+            # List row: belongs to current block
             if current is None:
                 continue
 
-            # 解析碎片列表 (Fragment list row)
+            # Fragment list row
             frag_id = _norm_cell(row.get("FragmentIdList[]"))
             if frag_id is not None:
                 frag_level = _to_float(row.get("FragmentLevelList[]"), 0.0)
@@ -245,38 +232,36 @@ class RuntimeInputRepository:
                     )
                 )
 
-            # 解析裝備列表 (Equipment list row)
+            # Equipment list row
             eq_id = _norm_cell(row.get("EquipmentIdList[]"))
             if eq_id is not None:
                 current.equipment_ids.append(str(eq_id))
 
-            # 解析卡牌列表 (Card list row)
+            # Card list row
             card_id = _norm_cell(row.get("CardList[]"))
             if card_id is not None:
                 current.card_ids.append(str(card_id))
 
-            # 解析卡牌覺醒列表 (CardAwake list row) - 透過 append 對齊
+            # CardAwake list row (append to align, keep your original behavior)
             awake = _norm_cell(row.get("CardAwakeList[]"))
             if awake is not None:
                 current.card_awake_flags.append(_to_bool(awake, False))
 
-            # 解析潛能節點列表 (Potential node list row)
+            # Potential node list row
             node_id = _norm_cell(row.get("PotentialNodeList[]"))
             if node_id is not None:
                 node_level = _to_float(row.get("PotentialLevelList[]"), 0.0)
-                current.potential_nodes.append(
-                    PotentialNodeInput(node_id=str(node_id), level=node_level)
-                )
+                current.potential_nodes.append(PotentialNodeInput(node_id=str(node_id), level=node_level))
 
         flush_current()
 
         if self.log:
-            print(f"✅ Loaded CombatInputPanel: {len(inputs)} character blocks")
+            print(f"Loaded CombatInputPanel: {len(inputs)} character blocks")
             for cid, it in list(inputs.items())[:5]:
                 print(
-                    f"  - {cid}: Lv{it.level} Partner={it.partner_id} Stack={it.partner_stack_count} "
+                    f" - {cid}: Lv{it.level} Partner={it.partner_id} Stack={it.partner_stack_count} "
                     f"Fragments={len(it.fragments)} Equip={len(it.equipment_ids)} Cards={len(it.card_ids)} "
-                    f"Potentials={len(it.potential_nodes)}"
+                    f"Potentials={len(it.potential_nodes)} BonusFlag={it.is_partner_bonus_applied}"
                 )
 
         return inputs
@@ -295,52 +280,76 @@ class RuntimeInputRepository:
     ) -> Dict[str, Any]:
         """
         建立 AbilitySystem 所需的 context (上下文)。
+        會保證輸出 key 與型別，讓 battle_simulator / ability_system 更穩定。
 
-        主要負責將 Excel 輸入的夥伴資訊、堆疊層數、職業對照等資訊，
-        轉換為 AbilitySystem 可理解的字典格式。
-
-        Args:
-            active_character_id: 當前戰鬥的主要角色 ID
-            inputs_by_character: 從 load_combat_input_panel 載入的輸入資料
-            character_class_by_id: 角色 ID -> 職業對照表
-            partner_class_by_id: 夥伴 ID -> 職業對照表
-            ignore_if_bonus_flag_off: 若 Excel 中 IsPartnerBonusApplied 為 False，是否忽略夥伴加成
+        Required output keys:
+        - partner_id: Optional[str]
+        - partner_stack_count: int
+        - owner_class: Optional[str]
+        - partner_class: Optional[str]
+        - runtime_mod: Dict[str, Any]
+        - statuses: List[Any]
+        - extra_ctx: Dict[str, Any]
         """
         if active_character_id not in inputs_by_character:
-            raise KeyError(f"❌ active_character_id not found in input panel: {active_character_id}")
+            raise KeyError(f"active_character_id not found in input panel: {active_character_id}")
 
         inp = inputs_by_character[active_character_id]
-        partner_id = inp.partner_id
 
+        # Base context (always present)
+        ctx: Dict[str, Any] = {
+            "partner_id": None,
+            "partner_stack_count": 0,
+            "owner_class": None,
+            "partner_class": None,
+            "runtime_mod": {},
+            "statuses": [],
+            "extra_ctx": {},
+        }
+
+        partner_id = inp.partner_id
         if not partner_id:
-            return {
-                "partner_id": None,
-                "partner_stack_count": 0,
-                "owner_class": None,
-                "partner_class": None,
-                "extra_ctx": {"reason": "NoPartnerEquipped"},
-            }
+            ctx["extra_ctx"] = {"reason": "NoPartnerEquipped"}
+            if self.log:
+                print("[AbilityContext] No partner equipped on active character.")
+            return ctx
 
         if ignore_if_bonus_flag_off and (not inp.is_partner_bonus_applied):
-            return {
-                "partner_id": None,
-                "partner_stack_count": 0,
-                "owner_class": None,
-                "partner_class": None,
-                "extra_ctx": {"reason": "PartnerBonusFlagOff"},
-            }
+            ctx["extra_ctx"] = {"reason": "PartnerBonusFlagOff"}
+            if self.log:
+                print("[AbilityContext] Partner equipped but bonus flag is OFF. Ignored by config.")
+            return ctx
 
         owner_class = character_class_by_id.get(active_character_id)
         partner_class = partner_class_by_id.get(partner_id)
 
-        return {
-            "partner_id": partner_id,
-            "partner_stack_count": int(inp.partner_stack_count),
-            "owner_class": owner_class,
-            "partner_class": partner_class,
-            "extra_ctx": {
-                "partner_level": float(inp.partner_level),
-                "is_partner_bonus_applied": bool(inp.is_partner_bonus_applied),
-                "affection_level": int(inp.affection_level),
-            },
+        ctx["partner_id"] = str(partner_id)
+        ctx["partner_stack_count"] = int(inp.partner_stack_count)
+        ctx["owner_class"] = owner_class
+        ctx["partner_class"] = partner_class
+        ctx["extra_ctx"] = {
+            "partner_level": float(inp.partner_level),
+            "is_partner_bonus_applied": bool(inp.is_partner_bonus_applied),
+            "affection_level": int(inp.affection_level),
         }
+
+        # Helpful logs for common "not triggered" causes
+        if self.log:
+            if owner_class is None:
+                print(
+                    f"[AbilityContext][Warn] owner_class not found for CharacterId={active_character_id}. "
+                    "Check Character.xlsx/CharacterIndex: Class column and CharacterId match."
+                )
+            if partner_class is None:
+                print(
+                    f"[AbilityContext][Warn] partner_class not found for PartnerId={partner_id}. "
+                    "Check Partner.xlsx: a sheet contains PartnerId + Class mapping."
+                )
+            print(
+                "[AbilityContext] "
+                f"partner_id={ctx['partner_id']} stack={ctx['partner_stack_count']} "
+                f"owner_class={ctx['owner_class']} partner_class={ctx['partner_class']} "
+                f"bonus_flag={ctx['extra_ctx']['is_partner_bonus_applied']}"
+            )
+
+        return ctx
