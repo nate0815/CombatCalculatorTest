@@ -230,7 +230,7 @@ def main() -> int:
     print(f"[Main] Party: {', '.join(party_char_ids)} (active={active_character_id})")
 
     # Phase 1 snapshots
-    snapshots = calc_all_character_snapshots(verbose=False)
+    snapshots = calc_all_character_snapshots(verbose=True)
     if not snapshots:
         raise ValueError("calc_all_character_snapshots() 沒有產出任何 CharacterSnapshot")
 
