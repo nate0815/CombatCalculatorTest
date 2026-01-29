@@ -13,6 +13,7 @@ import pandas as pd
 
 # Excel cell text limit
 _EXCEL_CELL_CHAR_LIMIT = 32767
+
 # Excel formula-like prefixes (can trigger "formula" parsing / injection)
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
 
@@ -66,12 +67,26 @@ def _sanitize_excel_text(value: Any) -> Any:
 
 @dataclass
 class AbilityBattleMetrics:
+    # Generic
     ability_triggered: bool = False
-    ability_before_multiplier: Optional[float] = None
-    ability_after_multiplier: Optional[float] = None
-    ability_statuses: Optional[int] = None
-    ability_damage_mul_apply_count: int = 0
     ability_trigger_message: Optional[str] = None
+
+    # Douglas / outgoing damage
+    damage_before_multiplier: Optional[float] = None
+    damage_after_multiplier: Optional[float] = None
+    damage_mul_apply_count: int = 0
+
+    # Arwen / healing bonus
+    heal_before_multiplier: Optional[float] = None
+    heal_after_multiplier: Optional[float] = None
+    heal_mul_apply_count: int = 0
+
+    # Arwen / points & mitigation
+    arwen_points_init: Optional[int] = None
+    arwen_points_last: Optional[int] = None
+    arwen_consume_count: int = 0
+    incoming_mitigation_apply_count: int = 0
+    last_incoming_mul: Optional[float] = None
 
 
 class BattleReporter:
@@ -81,15 +96,50 @@ class BattleReporter:
     - Config: key/value pairs for this run
     - EventLog: raw events (optional, potentially huge)
 
-    New in this version:
-    - Auto-capture ability debug signals from EventLog and write into Summary
-      (ability_before_multiplier / ability_after_multiplier / statuses / apply_count).
+    Auto-capture ability debug signals from EventLog (even if EventLog disabled)
+    and write into Summary.
+
+    This reporter is tolerant: it relies on message text patterns rather than strict enums.
     """
 
-    # Regex patterns for parsing log text
-    _re_before = re.compile(r"Before trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)")
-    _re_after = re.compile(r"After trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)\s*\(statuses=([0-9]+)\)")
-    _re_apply = re.compile(r"Apply player_damage_multiplier=([0-9]*\.?[0-9]+)\s+to damage value")
+    # -------------------------
+    # Regex patterns (tolerant)
+    # -------------------------
+
+    # Example (from battle_simulator.py):
+    # [Ability] Before trigger: player_damage_multiplier=1.0 healing_multiplier=1.0
+    _re_before = re.compile(
+        r"Before trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)\s+healing_multiplier=([0-9]*\.?[0-9]+)"
+    )
+
+    # Example:
+    # [Ability] After trigger: player_damage_multiplier=1.16 healing_multiplier=1.08 (extra_ctx_keys=[...])
+    _re_after = re.compile(
+        r"After trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)\s+healing_multiplier=([0-9]*\.?[0-9]+)"
+    )
+
+    # Example:
+    # [Ability] Apply player_damage_multiplier=1.16 to damage value
+    _re_apply_damage = re.compile(
+        r"Apply player_damage_multiplier=([0-9]*\.?[0-9]+)\s+to damage value"
+    )
+
+    # Example:
+    # [Ability] Apply healing_multiplier=1.08 to heal value
+    _re_apply_heal = re.compile(
+        r"Apply healing_multiplier=([0-9]*\.?[0-9]+)\s+to heal value"
+    )
+
+    # Arwen init:
+    # [Arwen] Init points=3
+    _re_arwen_init = re.compile(r"\[Arwen\]\s*Init points=([0-9]+)")
+
+    # Arwen after attack:
+    # [Arwen] After OnEnemyAttack: points=2 (mul=0.9)
+    _re_arwen_after_hit = re.compile(
+        r"\[Arwen\]\s*After OnEnemyAttack:\s*points=([0-9]+)\s*\(mul=([0-9]*\.?[0-9]+)\)"
+    )
+
     _re_triggered = re.compile(r"\btriggered by\b", re.IGNORECASE)
 
     def __init__(
@@ -113,12 +163,13 @@ class BattleReporter:
         self._config_rows: List[Dict[str, Any]] = []
         self._events: List[Dict[str, Any]] = []
 
-        # NEW: per-battle ability metrics captured from events
+        # Per-battle metrics captured from events
         self._ability_by_battle: Dict[int, AbilityBattleMetrics] = {}
 
     # =========================================================
     # Summary / Config
     # =========================================================
+
     def add_summary(
         self,
         battle_index: int,
@@ -138,7 +189,6 @@ class BattleReporter:
         if extra:
             for k, v in extra.items():
                 row[str(k)] = _sanitize_excel_text(v)
-
         self._summary_rows.append(row)
 
     def add_config(self, key: str, value: Any) -> None:
@@ -149,16 +199,16 @@ class BattleReporter:
     # =========================================================
     # Event Log (raw)
     # =========================================================
+
     def add_event(self, payload: Dict[str, Any]) -> None:
         """
         payload recommended keys:
         - battle_index, turn, actor, event_type, message
         Any other keys will be JSON-packed into `extra` to keep columns stable.
 
-        NEW:
-        - Parses ability-related messages to capture metrics for Summary.
+        NOTE:
+        - We always parse ability-related signals even if event log is disabled.
         """
-        # Always parse ability metrics even if event log disabled
         self._try_capture_ability_metrics(payload)
 
         if not self.enable_event_log:
@@ -189,13 +239,10 @@ class BattleReporter:
         )
 
     def _try_capture_ability_metrics(self, payload: Dict[str, Any]) -> None:
-        """
-        Capture key ability information from the event stream.
-        This is purposely tolerant: it relies on message text patterns rather than event_type enums.
-        """
         bi_raw = payload.get("battle_index")
         if bi_raw is None:
             return
+
         try:
             battle_index = int(bi_raw)
         except Exception:
@@ -211,44 +258,84 @@ class BattleReporter:
             met = AbilityBattleMetrics()
             self._ability_by_battle[battle_index] = met
 
-        # Before trigger
+        # Ability before
         m = self._re_before.search(msg)
         if m:
             try:
-                met.ability_before_multiplier = float(m.group(1))
+                met.damage_before_multiplier = float(m.group(1))
+            except Exception:
+                pass
+            try:
+                met.heal_before_multiplier = float(m.group(2))
             except Exception:
                 pass
             return
 
-        # After trigger
+        # Ability after
         m = self._re_after.search(msg)
         if m:
             try:
-                met.ability_after_multiplier = float(m.group(1))
+                met.damage_after_multiplier = float(m.group(1))
             except Exception:
                 pass
             try:
-                met.ability_statuses = int(m.group(2))
+                met.heal_after_multiplier = float(m.group(2))
             except Exception:
                 pass
             return
 
-        # Apply multiplier to damage
-        m = self._re_apply.search(msg)
+        # Apply outgoing damage multiplier
+        m = self._re_apply_damage.search(msg)
         if m:
-            met.ability_damage_mul_apply_count += 1
-            # If after multiplier missing, try fill from this line
-            if met.ability_after_multiplier is None:
+            met.damage_mul_apply_count += 1
+            if met.damage_after_multiplier is None:
                 try:
-                    met.ability_after_multiplier = float(m.group(1))
+                    met.damage_after_multiplier = float(m.group(1))
                 except Exception:
                     pass
             return
 
-        # Triggered by ...
+        # Apply healing multiplier
+        m = self._re_apply_heal.search(msg)
+        if m:
+            met.heal_mul_apply_count += 1
+            if met.heal_after_multiplier is None:
+                try:
+                    met.heal_after_multiplier = float(m.group(1))
+                except Exception:
+                    pass
+            return
+
+        # Arwen init points
+        m = self._re_arwen_init.search(msg)
+        if m:
+            try:
+                met.arwen_points_init = int(m.group(1))
+                met.arwen_points_last = int(m.group(1))
+            except Exception:
+                pass
+            return
+
+        # Arwen after hit points & mul
+        m = self._re_arwen_after_hit.search(msg)
+        if m:
+            try:
+                points_now = int(m.group(1))
+                mul = float(m.group(2))
+                met.last_incoming_mul = mul
+                met.arwen_points_last = points_now
+
+                # If mul < 1.0 → means mitigation applied (points consumed)
+                if mul < 0.9999:
+                    met.incoming_mitigation_apply_count += 1
+                    met.arwen_consume_count += 1
+            except Exception:
+                pass
+            return
+
+        # Triggered by (generic)
         if self._re_triggered.search(msg):
             met.ability_triggered = True
-            # store a short trigger message for reference
             if met.ability_trigger_message is None:
                 met.ability_trigger_message = msg[:200]
             return
@@ -256,6 +343,7 @@ class BattleReporter:
     # =========================================================
     # Flush to Excel
     # =========================================================
+
     def flush_to_excel(
         self,
         extra_config: Optional[Dict[str, Any]] = None,
@@ -284,60 +372,117 @@ class BattleReporter:
                     "turns",
                     "player_hp_end",
                     "enemies_alive",
-                    # ability columns
+                    # ability columns (generic)
                     "ability_triggered",
-                    "ability_before_multiplier",
-                    "ability_after_multiplier",
-                    "ability_statuses",
-                    "ability_damage_mul_apply_count",
                     "ability_trigger_message",
+                    # outgoing dmg
+                    "damage_before_multiplier",
+                    "damage_after_multiplier",
+                    "damage_mul_apply_count",
+                    # healing
+                    "heal_before_multiplier",
+                    "heal_after_multiplier",
+                    "heal_mul_apply_count",
+                    # arwen
+                    "arwen_points_init",
+                    "arwen_points_last",
+                    "arwen_consume_count",
+                    "incoming_mitigation_apply_count",
+                    "last_incoming_mul",
                 ]
             )
         else:
-            # Enrich summary with ability metrics captured from event stream
             enriched: List[Dict[str, Any]] = []
             for r in self._summary_rows:
                 bi = int(r.get("battle_index", 0))
                 met = self._ability_by_battle.get(bi)
 
                 rr = dict(r)
+
+                # defaults
                 rr.setdefault("ability_triggered", False)
-                rr.setdefault("ability_before_multiplier", "")
-                rr.setdefault("ability_after_multiplier", "")
-                rr.setdefault("ability_statuses", "")
-                rr.setdefault("ability_damage_mul_apply_count", 0)
                 rr.setdefault("ability_trigger_message", "")
+
+                rr.setdefault("damage_before_multiplier", "")
+                rr.setdefault("damage_after_multiplier", "")
+                rr.setdefault("damage_mul_apply_count", 0)
+
+                rr.setdefault("heal_before_multiplier", "")
+                rr.setdefault("heal_after_multiplier", "")
+                rr.setdefault("heal_mul_apply_count", 0)
+
+                rr.setdefault("arwen_points_init", "")
+                rr.setdefault("arwen_points_last", "")
+                rr.setdefault("arwen_consume_count", 0)
+                rr.setdefault("incoming_mitigation_apply_count", 0)
+                rr.setdefault("last_incoming_mul", "")
 
                 if met is not None:
                     rr["ability_triggered"] = bool(met.ability_triggered)
-                    rr["ability_before_multiplier"] = (
-                        met.ability_before_multiplier if met.ability_before_multiplier is not None else ""
-                    )
-                    rr["ability_after_multiplier"] = (
-                        met.ability_after_multiplier if met.ability_after_multiplier is not None else ""
-                    )
-                    rr["ability_statuses"] = (
-                        met.ability_statuses if met.ability_statuses is not None else ""
-                    )
-                    rr["ability_damage_mul_apply_count"] = int(met.ability_damage_mul_apply_count)
                     rr["ability_trigger_message"] = met.ability_trigger_message or ""
+
+                    rr["damage_before_multiplier"] = (
+                        met.damage_before_multiplier
+                        if met.damage_before_multiplier is not None
+                        else ""
+                    )
+                    rr["damage_after_multiplier"] = (
+                        met.damage_after_multiplier
+                        if met.damage_after_multiplier is not None
+                        else ""
+                    )
+                    rr["damage_mul_apply_count"] = int(met.damage_mul_apply_count)
+
+                    rr["heal_before_multiplier"] = (
+                        met.heal_before_multiplier
+                        if met.heal_before_multiplier is not None
+                        else ""
+                    )
+                    rr["heal_after_multiplier"] = (
+                        met.heal_after_multiplier
+                        if met.heal_after_multiplier is not None
+                        else ""
+                    )
+                    rr["heal_mul_apply_count"] = int(met.heal_mul_apply_count)
+
+                    rr["arwen_points_init"] = (
+                        met.arwen_points_init if met.arwen_points_init is not None else ""
+                    )
+                    rr["arwen_points_last"] = (
+                        met.arwen_points_last if met.arwen_points_last is not None else ""
+                    )
+                    rr["arwen_consume_count"] = int(met.arwen_consume_count)
+                    rr["incoming_mitigation_apply_count"] = int(
+                        met.incoming_mitigation_apply_count
+                    )
+                    rr["last_incoming_mul"] = (
+                        met.last_incoming_mul if met.last_incoming_mul is not None else ""
+                    )
 
                 enriched.append(rr)
 
             df_summary = pd.DataFrame(enriched)
 
         # Config dataframe
-        df_config = pd.DataFrame(merged_config_rows) if merged_config_rows else pd.DataFrame(columns=["key", "value"])
+        df_config = (
+            pd.DataFrame(merged_config_rows)
+            if merged_config_rows
+            else pd.DataFrame(columns=["key", "value"])
+        )
 
         # EventLog dataframe
         if self.enable_event_log:
-            df_event = pd.DataFrame(self._events) if self._events else pd.DataFrame(
-                columns=["ts", "battle_index", "turn", "actor", "event_type", "message", "extra"]
+            df_event = (
+                pd.DataFrame(self._events)
+                if self._events
+                else pd.DataFrame(
+                    columns=["ts", "battle_index", "turn", "actor", "event_type", "message", "extra"]
+                )
             )
         else:
             df_event = pd.DataFrame()
 
-        # Sanitize (NOTE: pandas FutureWarning about applymap -> we use map)
+        # Sanitize (pandas map)
         df_summary = df_summary.map(_sanitize_excel_text)
         df_config = df_config.map(_sanitize_excel_text)
         if self.enable_event_log and not df_event.empty:
@@ -349,13 +494,13 @@ class BattleReporter:
         with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
             df_summary.to_excel(writer, sheet_name="Summary", index=False)
             df_config.to_excel(writer, sheet_name="Config", index=False)
-
             if self.enable_event_log:
                 df_event.to_excel(writer, sheet_name=self.event_log_sheet_name, index=False)
 
             # Basic sheet usability (freeze header row)
             try:
                 wb = writer.book
+
                 ws_sum = wb["Summary"]
                 ws_sum.freeze_panes = "A2"
                 ws_sum.auto_filter.ref = ws_sum.dimensions

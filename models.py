@@ -1,402 +1,281 @@
-# models.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, TypeVar
+
 
 # =========================================================
-# Common Enums (MVP)
+# Logging
 # =========================================================
+
 class LogLevel(str, Enum):
+    NONE = "NONE"
     INFO = "INFO"
     DEBUG = "DEBUG"
     TRACE = "TRACE"
 
 
-class TargetType(str, Enum):
-    """ 技能或卡牌的目標類型 """
-    # Card side (you already use these)
-    EnemySingle = "EnemySingle"  # 敵方單體
-    EnemyAll = "EnemyAll"        # 敵方全體
-    Self = "Self"                # 自身
-    AllySingle = "AllySingle"    # 我方單體
-    AllyAll = "AllyAll"          # 我方全體
+# =========================================================
+# Enemy Counter / Phase Rules (battle_simulator dependency)
+# =========================================================
 
-    # Monster side (current MVP)
-    Player = "Player"            # 玩家 (怪物攻擊目標)
+class CounterMode(str, Enum):
+    None_ = "None"
+    CountDown = "CountDown"
+    CountUp = "CountUp"
+    Fixed = "Fixed"
 
+
+class CounterStartTrigger(str, Enum):
+    None_ = "None"
+    OnBattleStart = "OnBattleStart"
+    OnEnemyPhaseStart = "OnEnemyPhaseStart"
+    OnPlayerPhaseStart = "OnPlayerPhaseStart"
+    OnFirstAction = "OnFirstAction"
+
+
+class EnemyPhaseActionRule(str, Enum):
+    """
+    How enemy action + counter reload/tick is handled in enemy phase.
+    (給 battle_simulator 做流程判斷用)
+    """
+    Default = "Default"
+    ExecuteThenReload = "ExecuteThenReload"
+    ReloadThenExecute = "ReloadThenExecute"
+    ExecuteOnly = "ExecuteOnly"
+    ReloadOnly = "ReloadOnly"
+
+
+class ReloadTiming(str, Enum):
+    """
+    When to reload next action/counter.
+    """
+    AfterExecute = "AfterExecute"
+    BeforeExecute = "BeforeExecute"
+    Never = "Never"
+
+
+# =========================================================
+# Phase 1 Output (Static snapshot)
+# =========================================================
+
+@dataclass
+class CharacterSnapshot:
+    character_id: str
+    final_atk: float
+    final_def: float
+    final_hp: float
+    level: Optional[float] = None
+
+
+@dataclass
+class PlayerPartySnapshot:
+    members: List[CharacterSnapshot]
+    active_character_id: str
+    team_hp_max: float = 0.0
+    team_hp: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.team_hp_max = float(sum(m.final_hp for m in self.members))
+        self.team_hp = float(self.team_hp_max)
+
+
+# =========================================================
+# Card System
+# =========================================================
 
 class EffectType(str, Enum):
-    """ 卡牌效果類型 """
-    Damage = "Damage"    # 傷害
-    Shield = "Shield"    # 護盾
-    Heal = "Heal"        # 治療
-    Buff = "Buff"        # 增益 (未實作)
-    Debuff = "Debuff"    # 減益 (未實作)
+    Damage = "Damage"
+    Heal = "Heal"
+    Shield = "Shield"
+    Buff = "Buff"
+    Debuff = "Debuff"
 
 
 class ScaleStat(str, Enum):
-    """ 數值加成的參照屬性 (例如：造成攻擊力 100% 的傷害) """
-    ATK = "ATK"      # 攻擊力
-    DEF = "DEF"      # 防禦力
-    HP = "HP"        # 血量
-    None_ = "None"   # 無 (使用 None_ 避免與 Python 關鍵字衝突)
+    None_ = "None"
+    ATK = "ATK"
+    DEF = "DEF"
+    HP = "HP"
+
+
+class TargetType(str, Enum):
+    EnemySingle = "EnemySingle"
+    EnemyAll = "EnemyAll"
+    Self = "Self"
+    AllySingle = "AllySingle"
+    AllyAll = "AllyAll"
 
 
 class CardLifecycle(str, Enum):
     Normal = "Normal"
     Exhaust = "Exhaust"
-    Ethereal = "Ethereal"
+    Persist = "Persist"
 
 
 class AfterPlayMove(str, Enum):
-    None_ = "None"
     Discard = "Discard"
-    Remove = "Remove"
+    Exhaust = "Exhaust"
+    KeepInHand = "KeepInHand"
 
 
 class OnEndTurnAction(str, Enum):
     None_ = "None"
-    Remove = "Remove"
+    Discard = "Discard"
+    Exhaust = "Exhaust"
 
 
-# ---- Monster skill system (MVP) ----
-class MonsterSkillType(str, Enum):
-    Attack = "Attack"      # 攻擊
-    AddShield = "AddShield"  # 增加護盾
-    Buff = "Buff"          # 增益
-    Debuff = "Debuff"      # 減益
-
-
-class ReloadTiming(str, Enum):
-    # You have unified to this in sheet
-    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"  # 敵方攻擊階段結束後重置計數器 (MVP 預設)
-
-
-class CounterMode(str, Enum):
-    Disabled = "Disabled"      # 停用
-    Enabled = "Enabled"        # 啟用
-    Conditional = "Conditional"  # 條件式
-
-
-class CounterStartTrigger(str, Enum):
-    # Your updated requirement: any card played (even non-attack) reduces counter
-    OnPlayerPlayCard = "OnPlayerPlayCard"  # 當玩家打出任意卡牌時觸發
-
-    # (reserved / future)
-    OnPlayerAttackCard = "OnPlayerAttackCard"
-    OnPlayerTurnStart = "OnPlayerTurnStart"
-
-
-class EnemyPhaseActionRule(str, Enum):
-    None_ = "None"
-    ActOnce = "ActOnce"  # 每回合行動一次
-    ActIfNotActedThisTurn = "ActIfNotActedThisTurn"  # 若本回合尚未行動則行動 (補刀/補行動)
-
-# =========================================================
-# Ability / Condition / Effect System (MVP)
-# =========================================================
-
-class TriggerEvent(str, Enum):
-    """能力觸發事件 (MVP 先支援到夥伴道格拉斯需求)"""
-    BattleStart = "BattleStart"
-    FirstTurnStart = "FirstTurnStart"
-    TurnStart = "TurnStart"
-    TurnEnd = "TurnEnd"
-    OnPlayerPlayCard = "OnPlayerPlayCard"
-
-
-class ConditionLogic(str, Enum):
-    AND = "AND"
-    OR = "OR"
-
-
-class ConditionType(str, Enum):
-    """條件種類 (MVP 只做職業相符)"""
-    OwnerClassEqualsPartnerClass = "OwnerClassEqualsPartnerClass"
-
-
-class ExecMode(str, Enum):
-    """EffectGroup 的執行模式"""
-    Sequential = "Sequential"
-    # future: RandomOne, Parallel, etc.
-
-
-class ValueRefType(str, Enum):
-    """EffectRow 的動態數值來源"""
-    None_ = "None"
-    PartnerStack = "PartnerStack"
-
-
-class AbilityEffectType(str, Enum):
-    """Ability 系統的效果類型 (避免與 Card EffectType 命名衝突)"""
-    AddStatus = "AddStatus"
-    SetStatusParam = "SetStatusParam"
-
-
-class StatusType(str, Enum):
-    """Runtime 狀態種類 (MVP 只做 AttackUp)"""
-    AttackUp = "AttackUp"
-
-
-class StatusParamKey(str, Enum):
-    """Status 參數 key (例如 AttackUp.increase)"""
-    increase = "increase"
-
-
-@dataclass
-class AbilityDef:
-    ability_id: str
-    trigger_event: TriggerEvent
-    condition_group_id: Optional[str]
-    effect_group_id: str
-    priority: int = 0
-    note: str = ""
-
-
-@dataclass
-class ConditionGroupDef:
-    condition_group_id: str
-    logic: ConditionLogic = ConditionLogic.AND
-
-
-@dataclass
-class ConditionRowDef:
-    condition_group_id: str
-    condition_type: ConditionType
-    # reserved for future params
-    value1: Optional[str] = None
-    value2: Optional[str] = None
-
-
-@dataclass
-class EffectGroupDef:
-    effect_group_id: str
-    exec_mode: ExecMode = ExecMode.Sequential
-
-
-@dataclass
-class EffectRowDef:
-    effect_group_id: str
-    effect_type: AbilityEffectType
-    value1: str = ""           # e.g., "AttackUp" / "increase"
-    value2: float = 0.0        # e.g., duration (for AddStatus) or numeric fallback
-    value_ref_type: ValueRefType = ValueRefType.None_
-    value_ref_id: Optional[str] = None  # e.g., PartnerAttackIncrease
-
-
-@dataclass
-class StatusInstance:
-    """戰鬥中的短期狀態 (buff/debuff)"""
-    status_type: StatusType
-    remaining_turns: int = 0
-    params: Dict[str, float] = field(default_factory=dict)
-    source_ability_id: str = ""
-
-
-@dataclass
-class PartyRuntimeState:
-    """玩家隊伍 runtime 狀態 (MVP: 只放 buff 與一些輸入參數)"""
-    statuses: List[StatusInstance] = field(default_factory=list)
-
-    # Input-driven params (from CombatInputPanel)
-    partner_stack_count: int = 0
-
-    def get_damage_multiplier(self) -> float:
-        """用於套用『造成傷害量』加成。"""
-        mul = 1.0
-        for s in self.statuses:
-            if s.status_type == StatusType.AttackUp:
-                inc = float(s.params.get(StatusParamKey.increase.value, 0.0))
-                mul *= (1.0 + inc)
-        return mul
-
-    def tick_turn_end(self) -> None:
-        """回合結束：扣掉 duration，清除到期狀態"""
-        alive: List[StatusInstance] = []
-        for s in self.statuses:
-            if s.remaining_turns > 0:
-                s.remaining_turns -= 1
-            if s.remaining_turns != 0:
-                # remaining_turns == 0 代表到期 (MVP)
-                alive.append(s)
-        self.statuses = alive
-
-# =========================================================
-# Phase 1 Output (Character Snapshot)
-# =========================================================
-@dataclass
-class CharacterSnapshot:
-    """
-    Result of Phase 1: Character Static Calculation
-
-    角色靜態數值快照 (Phase 1 計算結果)
-
-    這是一個凍結的角色最終基礎數值視圖 (ATK/DEF/HP)。
-    """
-    character_id: str
-    final_atk: float
-    final_def: float
-    final_hp: float
-
-    # Optional metadata
-    # 選用元資料
-    level: Optional[float] = None
-    affection_level: Optional[int] = None
-
-
-# =========================================================
-# Player Party (MVP: shared HP bar)
-# =========================================================
-@dataclass
-class PlayerPartySnapshot:
-    """
-    玩家隊伍快照 (MVP: 共用血條)
-
-    MVP 規則:
-    - 隊伍血量共用 (單一血條) = 成員血量總和。
-    - 受到傷害時扣除 team_hp。
-    - 護盾為全隊共用 (單一護盾池)。
-    - 卡牌倍率計算時使用的 ATK/DEF 來自當前活動角色 (active_character)。
-    """
-    members: List[CharacterSnapshot]
-    active_character_id: str
-
-    team_hp_max: float = 0.0
-    team_hp: float = 0.0
-    team_shield: float = 0.0
-
-    def __post_init__(self) -> None:
-        if not self.members:
-            raise ValueError("PlayerPartySnapshot.members cannot be empty")
-
-        self.team_hp_max = float(sum(m.final_hp for m in self.members))
-        self.team_hp = float(self.team_hp_max)
-
-        if not any(m.character_id == self.active_character_id for m in self.members):
-            # fallback to first member
-            self.active_character_id = self.members[0].character_id
-
-    def get_active_member(self) -> CharacterSnapshot:
-        for m in self.members:
-            if m.character_id == self.active_character_id:
-                return m
-        return self.members[0]
-
-
-# =========================================================
-# Card Data (MVP)
-# =========================================================
 @dataclass
 class Card:
     card_id: str
     character_id: str
     group_id: str
     epiphany_tier: int = 0
-
-    # NEW: AP cost
-    # 新增: AP 消耗 (預設為 1)
     ap_cost: int = 1
 
 
 @dataclass
 class CardEffect:
-    """ 卡牌效果定義 """
     card_id: str
     effect_index: int
     effect_type: EffectType
     scale_stat: ScaleStat
-    multiplier: float = 0.0
-    flat_value: float = 0.0
-
-    card_lifecycle: CardLifecycle = CardLifecycle.Normal
-    after_play_move: AfterPlayMove = AfterPlayMove.Discard
-    on_end_turn_action: OnEndTurnAction = OnEndTurnAction.None_
-    target: TargetType = TargetType.EnemySingle
-
-    # reserved / future
-    duration_turn: int = 0
-    stackable: bool = False
-    max_stack: int = 0
-    condition: Optional[str] = None
+    multiplier: float
+    flat_value: float
+    card_lifecycle: CardLifecycle
+    after_play_move: AfterPlayMove
+    on_end_turn_action: OnEndTurnAction
+    target: TargetType
 
 
 # =========================================================
-# Monster Data (MVP)
+# Monster (battle_simulator dependency)
 # =========================================================
+
 @dataclass
 class MonsterIndex:
+    """
+    Minimal monster index info for simulator.
+    Extend as needed (rarity, tags, etc.)
+    """
     monster_id: str
-    monster_rank: str
-    monster_weight: int = 1
+    name: Optional[str] = None
 
 
 @dataclass
 class MonsterBaseStat:
     monster_id: str
-    level: int
-    attack: float
+    atk: float
     defense: float
-    health: float
+    hp: float
+
+
+class MonsterSkillType(str, Enum):
+    """
+    Enemy skill types referenced by battle_simulator.
+    """
+    Attack = "Attack"
+    Heal = "Heal"
+    Buff = "Buff"
+    Debuff = "Debuff"
+    Guard = "Guard"
+    Special = "Special"
 
 
 @dataclass
 class MonsterSkill:
-    """ 怪物技能定義 """
-    skill_id: str
     monster_id: str
+    skill_id: str
     skill_type: MonsterSkillType
-    value: float  # 技能數值 (傷害值或護盾值)
-    counter_max: int  # 最大計數 (CD)
-    reload_timing: ReloadTiming  # 重置時機
-    counter_mode: CounterMode  # 計數器模式
-    counter_start_trigger: CounterStartTrigger  # 計數器觸發條件
-    enemy_phase_action_rule: EnemyPhaseActionRule  # 敵方階段行動規則
-    target: TargetType  # 技能目標
+
+    # Core numeric params (optional / depends on sheet design)
+    multiplier: float = 1.0
+    flat_value: float = 0.0
+
+    # Counter-related fields (optional)
+    counter_mode: CounterMode = CounterMode.None_
+    counter_start_trigger: CounterStartTrigger = CounterStartTrigger.None_
+    counter_value: int = 0
+    reload_timing: ReloadTiming = ReloadTiming.AfterExecute
 
 
-# =========================================================
-# Runtime State (MVP)
-# =========================================================
 @dataclass
 class MonsterState:
-    """ 怪物戰鬥時的動態狀態 (HP, 護盾, 計數器等) """
+    """
+    Runtime monster state in battle simulation.
+    """
     monster_id: str
     hp: float
-    shield: float = 0.0
-    counter: int = 0        # 當前計數
-    counter_max: int = 0    # 最大計數 (用於重置)
+    alive: bool = True
 
-    # for EnemyPhaseActionRule = ActIfNotActedThisTurn
-    has_acted_this_turn: bool = False  # 本回合是否已行動標記
+    # current counter & action pointers (if your sim uses them)
+    counter: int = 0
+    current_skill_id: Optional[str] = None
 
+
+# =========================================================
+# Ability / Status (used by ability_system)
+# =========================================================
+
+class StatusType(str, Enum):
+    AttackUp = "AttackUp"
+    DefenseUp = "DefenseUp"
+    HealingUp = "HealingUp"
+    IncomingDamageDown = "IncomingDamageDown"
+
+
+@dataclass
+class StatusInstance:
+    status_type: StatusType
+    remaining_turns: int
+    params: Dict[str, Any] = field(default_factory=dict)
+    source_ability_id: Optional[str] = None
+
+
+# =========================================================
+# Battle Result
+# =========================================================
 
 @dataclass
 class BattleResult:
     battle_index: int
-    winner: str  # "Player" or "Enemy"
+    winner: str
     turns: int
     player_hp_end: float
     enemies_alive: int
 
 
 # =========================================================
-# Utility: simple enum parsing helper
+# Utils
 # =========================================================
-def parse_enum(enum_cls: Enum, value: str, default):
-    """ Safe enum parse for sheet strings.
 
-    - enum_cls: Enum class
-    - value: sheet string
-    - default: default enum value if parsing fails
+TEnum = TypeVar("TEnum", bound=Enum)
+
+
+def parse_enum(enum_type: Type[TEnum], raw: Any, default: TEnum) -> TEnum:
     """
-    if value is None:
+    Safe enum parser for Excel / string input.
+    """
+    if raw is None:
         return default
-    v = str(value).strip()
-    if v == "":
+
+    if isinstance(raw, enum_type):
+        return raw
+
+    s = str(raw).strip()
+    if s == "":
         return default
+
+    # by value
     try:
-        return enum_cls(v)
+        return enum_type(s)  # type: ignore
     except Exception:
-        return default
+        pass
+
+    # by name
+    for e in enum_type:  # type: ignore
+        if e.name.lower() == s.lower():
+            return e
+
+    return default

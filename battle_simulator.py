@@ -26,13 +26,16 @@ from models import (
     TargetType,
 )
 
+from ability_models import TriggerEvent
+
 
 @dataclass
 class BattleConfig:
     ap_max: int = 3
     max_turns: int = 999
-    log_level: LogLevel = LogLevel.INFO  # kept for backward compatibility with main.py
+    log_level: LogLevel = LogLevel.INFO
 
+    # kept for backward compatibility with main.py
     # 舊版語意：當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段
     # 新版抽手牌邏輯下：我們會改成「沒有可出的牌就結束玩家階段」
     stop_when_insufficient_ap: bool = True
@@ -88,7 +91,6 @@ def pick_enemy_single(
     alive = [(mi, ms, st) for (mi, ms, st) in monsters if st.hp > 0]
     if not alive:
         return None
-
     # Highest weight first, stable by monster_id
     alive.sort(key=lambda x: (-x[0].monster_weight, x[0].monster_id))
     return alive[0]
@@ -100,7 +102,6 @@ class BattleSimulator:
     - 隊伍共用血條 (PlayerPartySnapshot.team_hp / team_hp_max)
     - 隊伍共用護盾池 (PlayerPartySnapshot.team_shield)
     - AP 系統 (最大 AP=3)，每張卡牌依 Card.ap_cost 消耗
-
     - 抽牌/棄牌/洗牌:
       1) 初始全部卡牌進 Draw Pile
       2) 玩家回合開始抽 hand_size 張
@@ -108,15 +109,21 @@ class BattleSimulator:
       4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
       5) 回合結束：手牌剩餘全部丟棄牌堆
       6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
-
     - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
     - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
-    - 敵方階段規則 (ActIfNotActedThisTurn): 若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
-    - 重置時機 (AfterEnemyAttackPhase): 怪物本回合行動後，於敵方階段結束時重置計數器
+    - 敵方階段規則 (ActIfNotActedThisTurn):
+      若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
+    - 重置時機 (AfterEnemyAttackPhase):
+      怪物本回合行動後，於敵方階段結束時重置計數器
 
     ★ Ability Hook：
+    - BattleStart：每場戰鬥開始時觸發一次（亞玟點數初始化）
     - Turn1 開始時觸發 FirstTurnStart（每場戰鬥只在第一回合觸發）
-    - AbilitySystem 透過 ctx["runtime_mod"]["player_damage_multiplier"] 影響本回合出牌傷害
+    - OnEnemyAttack：每次怪物攻擊前觸發（亞玟扣點數並減傷）
+    - AbilitySystem 透過 runtime_mod:
+        player_damage_multiplier：影響本回合出牌傷害
+        healing_multiplier：影響本回合治療量
+        incoming_damage_multiplier：影響本次受擊傷害（怪物攻擊）
     """
 
     def __init__(self, config: BattleConfig, reporter: BattleReporter) -> None:
@@ -128,6 +135,7 @@ class BattleSimulator:
     # =========================================================
     # Public
     # =========================================================
+
     def run_many(
         self,
         battle_count: int,
@@ -158,7 +166,6 @@ class BattleSimulator:
                 ability_context=ability_context,
             )
             results.append(res)
-
         return results
 
     def run_single(
@@ -173,7 +180,10 @@ class BattleSimulator:
         ability_system: Optional[Any] = None,
         ability_context: Optional[Dict[str, Any]] = None,
     ) -> BattleResult:
-        ability_context = ability_context or {}
+        # NOTE: ability_context is shared across triggers in this battle
+        ability_context = dict(ability_context or {})
+        ability_context.setdefault("extra_ctx", {})
+        ability_context.setdefault("statuses", [])
 
         # --------------------------
         # Init party runtime state
@@ -191,7 +201,6 @@ class BattleSimulator:
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for sk in monster_skills:
             skills_by_monster.setdefault(sk.monster_id, []).append(sk)
-
         for mid in skills_by_monster:
             # 讓技能順序可預期
             skills_by_monster[mid].sort(key=lambda s: s.skill_id)
@@ -246,10 +255,56 @@ class BattleSimulator:
             0,
             "System",
             "InitEnemies",
-            "[Init] Enemies=" + ", ".join(
-                [f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]
-            ),
+            "[Init] Enemies="
+            + ", ".join([f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]),
         )
+
+        # --------------------------
+        # Ability: BattleStart (one-time per battle)
+        # --------------------------
+        if ability_system is not None:
+            enemy_count = sum(1 for _, _, st in monsters if st.hp > 0)
+
+            ctx_battle_start: Dict[str, Any] = {
+                "party": party_runtime,
+                "active_member": active_member,
+                "monsters": monsters,
+                "enemy_count": enemy_count,
+
+                # Condition inputs
+                "partner_id": ability_context.get("partner_id"),
+                "owner_class": ability_context.get("owner_class"),
+                "partner_class": ability_context.get("partner_class"),
+                "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
+
+                # Engine runtime state target
+                "runtime_mod": {},  # BattleStart usually writes extra_ctx / runtime_mod defaults
+            }
+
+            try:
+                ability_system.on_trigger(
+                    TriggerEvent.BattleStart,
+                    ctx=ctx_battle_start,
+                    ability_context=ability_context,
+                )
+            except Exception as e:
+                self._print_and_record_system(
+                    battle_index,
+                    0,
+                    "System",
+                    "AbilityError",
+                    f"[AbilityError] (BattleStart) {type(e).__name__}: {e}",
+                )
+
+            # Debug: show points if exists
+            if "arwen_points" in ability_context["extra_ctx"]:
+                self._print_and_record_system(
+                    battle_index,
+                    0,
+                    "System",
+                    "ArwenInit",
+                    f"[Arwen] Init points={ability_context['extra_ctx'].get('arwen_points')}",
+                )
 
         def draw_cards(turn: int, n: int) -> None:
             """Draw up to n cards into hand. If draw pile insufficient, shuffle discard into draw."""
@@ -277,7 +332,6 @@ class BattleSimulator:
         turn = 0
         while True:
             turn += 1
-
             if turn > self.config.max_turns:
                 return BattleResult(
                     battle_index=battle_index,
@@ -299,6 +353,7 @@ class BattleSimulator:
             # 回合開始抽手牌
             hand.clear()
             draw_cards(turn, int(self.config.hand_size))
+
             self._print_and_record_system(
                 battle_index,
                 turn,
@@ -312,43 +367,41 @@ class BattleSimulator:
             # -------------------------------------------------
             runtime_mod: Dict[str, Any] = {
                 "player_damage_multiplier": 1.0,
+                "healing_multiplier": 1.0,
             }
-            statuses: List[Any] = []
 
             # Douglas: 每場戰鬥只在第一回合觸發 -> FirstTurnStart
             if turn == 1 and ability_system is not None:
-                # NEW: pre-trigger snapshot for debug
                 self._print_and_record_system(
                     battle_index,
                     turn,
                     "System",
                     "AbilityBefore",
-                    f"[Ability] Before trigger: player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)}",
+                    f"[Ability] Before trigger: "
+                    f"player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
+                    f"healing_multiplier={runtime_mod.get('healing_multiplier', 1.0)}",
                 )
 
-                ctx = {
+                ctx_turn1: Dict[str, Any] = {
                     "party": party_runtime,
                     "active_member": active_member,
                     "monsters": monsters,
-                    # Required by AbilitySystem MVP
+
+                    # Condition inputs
                     "partner_id": ability_context.get("partner_id"),
                     "owner_class": ability_context.get("owner_class"),
                     "partner_class": ability_context.get("partner_class"),
                     "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
-                    # Engine will mutate these in-place
+
+                    # Engine runtime target
                     "runtime_mod": runtime_mod,
-                    "statuses": statuses,
                 }
-                # Also allow engine to use extra fields later
-                ctx.update(ability_context.get("extra_ctx", {}))
 
                 try:
                     ability_system.on_trigger(
-                        trigger_event="FirstTurnStart",
-                        battle_index=battle_index,
-                        turn=turn,
-                        ctx=ctx,
-                        emit=self._print_and_record_system,
+                        TriggerEvent.FirstTurnStart,
+                        ctx=ctx_turn1,
+                        ability_context=ability_context,
                     )
                 except Exception as e:
                     self._print_and_record_system(
@@ -356,17 +409,18 @@ class BattleSimulator:
                         turn,
                         "System",
                         "AbilityError",
-                        f"[AbilityError] {type(e).__name__}: {e}",
+                        f"[AbilityError] (FirstTurnStart) {type(e).__name__}: {e}",
                     )
 
-                # NEW: post-trigger snapshot for debug
                 self._print_and_record_system(
                     battle_index,
                     turn,
                     "System",
                     "AbilityAfter",
-                    f"[Ability] After trigger: player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
-                    f"(statuses={len(statuses)})",
+                    f"[Ability] After trigger: "
+                    f"player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
+                    f"healing_multiplier={runtime_mod.get('healing_multiplier', 1.0)} "
+                    f"(extra_ctx_keys={list(ability_context.get('extra_ctx', {}).keys())})",
                 )
 
             # 玩家出牌迴圈：先看 AP -> 篩可出 -> 隨機挑 1 張出
@@ -417,6 +471,8 @@ class BattleSimulator:
                     party=party_runtime,
                     monsters=monsters,
                     skills_by_monster=skills_by_monster,
+                    ability_system=ability_system,
+                    ability_context=ability_context,
                 )
 
                 # Battle end check
@@ -441,6 +497,7 @@ class BattleSimulator:
             for (mi, base, st) in monsters:
                 if st.hp <= 0:
                     continue
+
                 sk_list = skills_by_monster.get(mi.monster_id, [])
                 if not sk_list:
                     continue
@@ -458,6 +515,8 @@ class BattleSimulator:
                             monster_state=st,
                             skills_by_monster=skills_by_monster,
                             reason="EnemyPhase",
+                            ability_system=ability_system,
+                            ability_context=ability_context,
                         )
 
                         winner = self._get_winner(party_runtime, monsters)
@@ -478,6 +537,7 @@ class BattleSimulator:
                     continue
                 if not st.has_acted_this_turn:
                     continue
+
                 sk_list = skills_by_monster.get(mi.monster_id, [])
                 if not sk_list:
                     continue
@@ -502,6 +562,7 @@ class BattleSimulator:
     # =========================================================
     # Internal - Effects
     # =========================================================
+
     def _apply_card_effect(
         self,
         battle_index: int,
@@ -529,7 +590,6 @@ class BattleSimulator:
         if effect.effect_type == EffectType.Damage and runtime_mod is not None:
             mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
             if mul != 1.0:
-                # NEW: add a trace log to confirm multiplier applied
                 self._print_and_record_system(
                     battle_index,
                     turn,
@@ -537,7 +597,20 @@ class BattleSimulator:
                     "AbilityMul",
                     f"[Ability] Apply player_damage_multiplier={mul} to damage value",
                 )
-                value *= mul
+            value *= mul
+
+        # Ability runtime modifier: healing multiplier
+        if effect.effect_type == EffectType.Heal and runtime_mod is not None:
+            hmul = float(runtime_mod.get("healing_multiplier", 1.0))
+            if hmul != 1.0:
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    "System",
+                    "AbilityHealMul",
+                    f"[Ability] Apply healing_multiplier={hmul} to heal value",
+                )
+            value *= hmul
 
         if effect.effect_type == EffectType.Damage:
             if effect.target == TargetType.EnemyAll:
@@ -551,9 +624,9 @@ class BattleSimulator:
                         turn,
                         "Player",
                         "Damage",
-                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} Shield {old_sh:.1f}->{st.shield:.1f}",
+                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} "
+                        f"Shield {old_sh:.1f}->{st.shield:.1f}",
                     )
-
             elif effect.target == TargetType.EnemySingle:
                 picked = pick_enemy_single(monsters)
                 if picked is not None:
@@ -565,7 +638,8 @@ class BattleSimulator:
                         turn,
                         "Player",
                         "Damage",
-                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} Shield {old_sh:.1f}->{st.shield:.1f}",
+                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} "
+                        f"Shield {old_sh:.1f}->{st.shield:.1f}",
                     )
 
         elif effect.effect_type == EffectType.Shield:
@@ -593,6 +667,7 @@ class BattleSimulator:
     # =========================================================
     # Internal - Counter / Monster act
     # =========================================================
+
     def _tick_counters_on_player_play_card(
         self,
         battle_index: int,
@@ -600,10 +675,13 @@ class BattleSimulator:
         party: PlayerPartySnapshot,
         monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
         skills_by_monster: Dict[str, List[MonsterSkill]],
+        ability_system: Optional[Any],
+        ability_context: Dict[str, Any],
     ) -> None:
         for (mi, base, st) in monsters:
             if st.hp <= 0:
                 continue
+
             sk_list = skills_by_monster.get(mi.monster_id, [])
             if not sk_list:
                 continue
@@ -631,6 +709,8 @@ class BattleSimulator:
                     monster_state=st,
                     skills_by_monster=skills_by_monster,
                     reason="PlayerPhaseReaction",
+                    ability_system=ability_system,
+                    ability_context=ability_context,
                 )
 
     def _monster_act(
@@ -643,9 +723,12 @@ class BattleSimulator:
         monster_state: MonsterState,
         skills_by_monster: Dict[str, List[MonsterSkill]],
         reason: str,
+        ability_system: Optional[Any],
+        ability_context: Dict[str, Any],
     ) -> None:
         if monster_state.hp <= 0:
             return
+
         sk_list = skills_by_monster.get(monster_index.monster_id, [])
         if not sk_list:
             return
@@ -655,7 +738,58 @@ class BattleSimulator:
         monster_state.has_acted_this_turn = True
 
         if sk.skill_type == MonsterSkillType.Attack:
-            dmg = float(sk.value)
+            base_dmg = float(sk.value)
+
+            # Ability: OnEnemyAttack (per attack)
+            incoming_mod: Dict[str, Any] = {"incoming_damage_multiplier": 1.0}
+            if ability_system is not None:
+                ctx_hit: Dict[str, Any] = {
+                    "party": party,
+                    "active_member": party.get_active_member(),
+                    "monsters": [],
+
+                    # Condition inputs
+                    "partner_id": ability_context.get("partner_id"),
+                    "owner_class": ability_context.get("owner_class"),
+                    "partner_class": ability_context.get("partner_class"),
+                    "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
+
+                    # Runtime target for this attack
+                    "runtime_mod": incoming_mod,
+
+                    # Optional hit info (future-proof)
+                    "attacker_monster_id": monster_index.monster_id,
+                    "incoming_damage_base": base_dmg,
+                }
+                try:
+                    ability_system.on_trigger(
+                        TriggerEvent.OnEnemyAttack,
+                        ctx=ctx_hit,
+                        ability_context=ability_context,
+                    )
+                except Exception as e:
+                    self._print_and_record_system(
+                        battle_index,
+                        turn,
+                        "System",
+                        "AbilityError",
+                        f"[AbilityError] (OnEnemyAttack) {type(e).__name__}: {e}",
+                    )
+
+            mul = float(incoming_mod.get("incoming_damage_multiplier", 1.0))
+            dmg = base_dmg * mul
+
+            # Debug Arwen points after consume
+            if "arwen_points" in ability_context.get("extra_ctx", {}):
+                self._print_and_record_system(
+                    battle_index,
+                    turn,
+                    "System",
+                    "ArwenPoint",
+                    f"[Arwen] After OnEnemyAttack: points={ability_context['extra_ctx'].get('arwen_points')} "
+                    f"(mul={mul})",
+                )
+
             old_hp, old_sh = party.team_hp, party.team_shield
             party.team_hp, party.team_shield = apply_damage(party.team_hp, party.team_shield, dmg)
             self._print_and_record_system(
@@ -664,7 +798,8 @@ class BattleSimulator:
                 monster_index.monster_id,
                 "EnemyAttack",
                 f"[Damage] ({reason}) {monster_index.monster_id} -> Party "
-                f"Dmg={dmg:.1f} | HP {old_hp:.1f}->{party.team_hp:.1f} Shield {old_sh:.1f}->{party.team_shield:.1f}",
+                f"Dmg={dmg:.1f} (Base={base_dmg:.1f}, Mul={mul:.2f}) | "
+                f"HP {old_hp:.1f}->{party.team_hp:.1f} Shield {old_sh:.1f}->{party.team_shield:.1f}",
             )
 
         elif sk.skill_type == MonsterSkillType.AddShield:
@@ -681,6 +816,7 @@ class BattleSimulator:
     # =========================================================
     # Internal - End check
     # =========================================================
+
     def _get_winner(
         self,
         party: PlayerPartySnapshot,
@@ -695,6 +831,7 @@ class BattleSimulator:
     # =========================================================
     # Reporter helpers (use BattleReporter.add_event)
     # =========================================================
+
     def _print_and_record_system(
         self,
         battle_index: int,
