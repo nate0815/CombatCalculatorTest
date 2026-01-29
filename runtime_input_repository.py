@@ -13,38 +13,19 @@ import pandas as pd
 # ----------------------------
 
 def _norm_cell(v: Any) -> Optional[Any]:
-    """
-    標準化 Excel 儲存格的值：
-    - None / NaN / "" / "None" -> None
-    - 其他字串 -> strip
-    """
     if v is None:
         return None
-
-    # pandas NaN
     try:
         if isinstance(v, float) and pd.isna(v):
             return None
     except Exception:
         pass
-
     if isinstance(v, str):
         s = v.strip()
-        if s == "" or s.lower() == "none":
+        if s == "" or s.lower() in ("none", "nan"):
             return None
         return s
-
     return v
-
-
-def _to_int(v: Any, default: int = 0) -> int:
-    v = _norm_cell(v)
-    if v is None:
-        return default
-    try:
-        return int(float(v))
-    except Exception:
-        return default
 
 
 def _to_float(v: Any, default: float = 0.0) -> float:
@@ -57,27 +38,43 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _to_int(v: Any, default: int = 0) -> int:
+    v = _norm_cell(v)
+    if v is None:
+        return default
+    try:
+        return int(float(v))
+    except Exception:
+        return default
+
+
 def _to_bool(v: Any, default: bool = False) -> bool:
-    """
-    嘗試將值轉換為布林值。
-    支援字串 ("true", "yes", "1") 與數值 (1/0) 的判斷。
-    """
     v = _norm_cell(v)
     if v is None:
         return default
     if isinstance(v, bool):
         return v
     if isinstance(v, (int, float)):
-        try:
-            return bool(int(v))
-        except Exception:
-            return default
-    s = str(v).strip().lower()
-    if s in ("true", "t", "yes", "y", "1"):
-        return True
-    if s in ("false", "f", "no", "n", "0", "none", "nan", ""):
-        return False
+        return bool(int(v))
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "t", "yes", "y", "1"):
+            return True
+        if s in ("false", "f", "no", "n", "0", "none", "nan", ""):
+            return False
     return default
+
+
+def _split_csv(v: Any) -> List[str]:
+    v = _norm_cell(v)
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if _norm_cell(x) is not None]
+    s = str(v).strip()
+    if s == "":
+        return []
+    return [x.strip() for x in s.split(",") if x.strip() != ""]
 
 
 def _require_columns(df: pd.DataFrame, required_cols: List[str]) -> None:
@@ -117,6 +114,10 @@ class CharacterLoadoutInput:
 
     affection_level: int = 0
 
+    # NEW (optional): used by AbilitySystem condition OwnerClassEqualsPartnerClass
+    owner_class: Optional[str] = None
+    partner_class: Optional[str] = None
+
     fragments: List[FragmentInput] = field(default_factory=list)
     equipment_ids: List[str] = field(default_factory=list)
     card_ids: List[str] = field(default_factory=list)
@@ -148,10 +149,6 @@ class RuntimeInputRepository:
         excel_name: str = "CombatInputPanel.xlsx",
         sheet_name: str = "CombatInputPanel",
     ) -> Dict[str, CharacterLoadoutInput]:
-        """
-        Returns:
-            Dict[character_id, CharacterLoadoutInput]
-        """
         path = self.data_dir / excel_name
         if not path.exists():
             raise FileNotFoundError(f"Input panel not found: {path}")
@@ -180,6 +177,10 @@ class RuntimeInputRepository:
         ]
         _require_columns(df, required_cols)
 
+        # Optional columns (if present)
+        has_owner_class = "OwnerClass" in df.columns
+        has_partner_class = "PartnerClass" in df.columns
+
         inputs: Dict[str, CharacterLoadoutInput] = {}
         current: Optional[CharacterLoadoutInput] = None
 
@@ -204,151 +205,63 @@ class RuntimeInputRepository:
                 affection_level = _to_int(row.get("AffectionLevel"), 0)
                 note = _norm_cell(row.get("Note"))
 
+                owner_class = _norm_cell(row.get("OwnerClass")) if has_owner_class else None
+                partner_class = _norm_cell(row.get("PartnerClass")) if has_partner_class else None
+
                 current = CharacterLoadoutInput(
                     character_id=str(char_id),
-                    level=level,
+                    level=float(level),
                     partner_id=str(partner_id) if partner_id is not None else None,
-                    partner_level=partner_level,
-                    partner_stack_count=partner_stack_count,
-                    affection_level=affection_level,
+                    partner_level=float(partner_level),
+                    partner_stack_count=int(partner_stack_count),
+                    affection_level=int(affection_level),
+                    owner_class=str(owner_class) if owner_class is not None else None,
+                    partner_class=str(partner_class) if partner_class is not None else None,
                     note=str(note) if note is not None else None,
                 )
                 continue
 
-            # List row: belongs to current block
+            # List rows (belong to current block)
             if current is None:
                 continue
 
-            # Fragment list row
-            frag_id = _norm_cell(row.get("FragmentIdList[]"))
-            if frag_id is not None:
-                frag_level = _to_float(row.get("FragmentLevelList[]"), 0.0)
-                rnd_stat = _norm_cell(row.get("FragmentRandomStatList[]"))
-                rnd_val = _to_float(row.get("FragmentRandomValueList[]"), 0.0)
-                current.fragments.append(
-                    FragmentInput(
-                        fragment_id=str(frag_id),
-                        level=frag_level,
-                        random_stat=str(rnd_stat) if rnd_stat is not None else None,
-                        random_value=rnd_val,
+            frag_ids = _split_csv(row.get("FragmentIdList[]"))
+            frag_lvls = _split_csv(row.get("FragmentLevelList[]"))
+            frag_rstats = _split_csv(row.get("FragmentRandomStatList[]"))
+            frag_rvals = _split_csv(row.get("FragmentRandomValueList[]"))
+
+            # fragments
+            if frag_ids:
+                for i, fid in enumerate(frag_ids):
+                    lvl = float(frag_lvls[i]) if i < len(frag_lvls) and frag_lvls[i] != "" else 0.0
+                    rstat = frag_rstats[i] if i < len(frag_rstats) and frag_rstats[i] != "" else None
+                    rval = float(frag_rvals[i]) if i < len(frag_rvals) and frag_rvals[i] != "" else 0.0
+                    current.fragments.append(
+                        FragmentInput(fragment_id=str(fid), level=float(lvl), random_stat=rstat, random_value=float(rval))
                     )
-                )
 
-            # Equipment list row
-            eq_id = _norm_cell(row.get("EquipmentIdList[]"))
-            if eq_id is not None:
-                current.equipment_ids.append(str(eq_id))
+            # equipment
+            eq_ids = _split_csv(row.get("EquipmentIdList[]"))
+            for eid in eq_ids:
+                current.equipment_ids.append(str(eid))
 
-            # Card list row
-            card_id = _norm_cell(row.get("CardList[]"))
-            if card_id is not None:
-                current.card_ids.append(str(card_id))
+            # cards
+            card_ids = _split_csv(row.get("CardList[]"))
+            card_awake = _split_csv(row.get("CardAwakeList[]"))
+            for i, cid in enumerate(card_ids):
+                current.card_ids.append(str(cid))
+                flag = _to_bool(card_awake[i], False) if i < len(card_awake) else False
+                current.card_awake_flags.append(flag)
 
-            # CardAwake list row (append to align)
-            awake = _norm_cell(row.get("CardAwakeList[]"))
-            if awake is not None:
-                current.card_awake_flags.append(_to_bool(awake, False))
-
-            # Potential node list row
-            node_id = _norm_cell(row.get("PotentialNodeList[]"))
-            if node_id is not None:
-                node_level = _to_float(row.get("PotentialLevelList[]"), 0.0)
-                current.potential_nodes.append(
-                    PotentialNodeInput(node_id=str(node_id), level=node_level)
-                )
+            # potential
+            node_ids = _split_csv(row.get("PotentialNodeList[]"))
+            node_lvls = _split_csv(row.get("PotentialLevelList[]"))
+            for i, nid in enumerate(node_ids):
+                lvl = float(node_lvls[i]) if i < len(node_lvls) and node_lvls[i] != "" else 0.0
+                current.potential_nodes.append(PotentialNodeInput(node_id=str(nid), level=float(lvl)))
 
         flush_current()
 
         if self.log:
-            print(f"Loaded CombatInputPanel: {len(inputs)} character blocks")
-            for cid, it in list(inputs.items())[:5]:
-                print(
-                    f" - {cid}: Lv{it.level} Partner={it.partner_id} Stack={it.partner_stack_count} "
-                    f"Fragments={len(it.fragments)} Equip={len(it.equipment_ids)} Cards={len(it.card_ids)} "
-                    f"Potentials={len(it.potential_nodes)}"
-                )
-
+            print(f"[RuntimeInputRepository] Loaded inputs: {len(inputs)}")
         return inputs
-
-    # -------------------------------------------------------
-    # AbilityContext builder (what battle_simulator needs)
-    # -------------------------------------------------------
-
-    def build_ability_context(
-        self,
-        active_character_id: str,
-        inputs_by_character: Dict[str, CharacterLoadoutInput],
-        character_class_by_id: Dict[str, str],
-        partner_class_by_id: Dict[str, str],
-    ) -> Dict[str, Any]:
-        """
-        建立 AbilitySystem 所需的 context (上下文)。
-        會保證輸出 key 與型別，讓 battle_simulator / ability_system 更穩定。
-
-        Required output keys:
-        - partner_id: Optional[str]
-        - partner_stack_count: int
-        - owner_class: Optional[str]
-        - partner_class: Optional[str]
-        - runtime_mod: Dict[str, Any]
-        - statuses: List[Any]
-        - extra_ctx: Dict[str, Any]
-        """
-        if active_character_id not in inputs_by_character:
-            raise KeyError(f"active_character_id not found in input panel: {active_character_id}")
-
-        inp = inputs_by_character[active_character_id]
-
-        # Base context (always present)
-        ctx: Dict[str, Any] = {
-            "partner_id": None,
-            "partner_stack_count": 0,
-            "owner_class": None,
-            "partner_class": None,
-            "runtime_mod": {},
-            "statuses": [],
-            "extra_ctx": {},
-        }
-
-        partner_id = inp.partner_id
-        if not partner_id:
-            ctx["extra_ctx"] = {"reason": "NoPartnerEquipped"}
-            if self.log:
-                print("[AbilityContext] No partner equipped on active character.")
-            return ctx
-
-        owner_class = character_class_by_id.get(active_character_id)
-        partner_class = partner_class_by_id.get(partner_id)
-
-        ctx["partner_id"] = str(partner_id)
-        ctx["partner_stack_count"] = int(inp.partner_stack_count)
-        ctx["owner_class"] = owner_class
-        ctx["partner_class"] = partner_class
-
-        # Persistent extra_ctx
-        ctx["extra_ctx"] = {
-            "partner_level": float(inp.partner_level),
-            "affection_level": int(inp.affection_level),
-        }
-
-        # Helpful logs for common "not triggered" causes
-        if self.log:
-            if owner_class is None:
-                print(
-                    "[AbilityContext][Warn] owner_class not found for "
-                    f"CharacterId={active_character_id}. "
-                    "Check Character.xlsx/CharacterIndex: Class column and CharacterId match."
-                )
-            if partner_class is None:
-                print(
-                    "[AbilityContext][Warn] partner_class not found for "
-                    f"PartnerId={partner_id}. "
-                    "Check Partner.xlsx: a sheet contains PartnerId + Class mapping."
-                )
-            print(
-                "[AbilityContext] "
-                f"partner_id={ctx['partner_id']} stack={ctx['partner_stack_count']} "
-                f"owner_class={ctx['owner_class']} partner_class={ctx['partner_class']}"
-            )
-
-        return ctx

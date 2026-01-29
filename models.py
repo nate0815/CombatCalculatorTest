@@ -1,3 +1,4 @@
+# models.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,62 +7,62 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 
 
 # =========================================================
+# Helpers
+# =========================================================
+TEnum = TypeVar("TEnum", bound=Enum)
+
+
+def parse_enum(enum_cls: Type[TEnum], raw: Any, default: TEnum) -> TEnum:
+    """
+    Tolerant enum parser:
+    - Accept Enum instance
+    - Accept exact value match
+    - Accept name match (case-insensitive)
+    - Accept string with whitespace
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, enum_cls):
+        return raw
+
+    s = str(raw).strip()
+    if s == "":
+        return default
+
+    # 1) match by value
+    for e in enum_cls:
+        try:
+            if str(e.value) == s:
+                return e
+        except Exception:
+            pass
+
+    # 2) match by name (case-insensitive)
+    s_upper = s.upper()
+    for e in enum_cls:
+        if e.name.upper() == s_upper:
+            return e
+
+    return default
+
+
+# =========================================================
 # Logging
 # =========================================================
-
 class LogLevel(str, Enum):
-    NONE = "NONE"
     INFO = "INFO"
     DEBUG = "DEBUG"
     TRACE = "TRACE"
 
 
 # =========================================================
-# Enemy Counter / Phase Rules (battle_simulator dependency)
+# Phase 1 Output - Character Snapshot
 # =========================================================
-
-class CounterMode(str, Enum):
-    None_ = "None"
-    CountDown = "CountDown"
-    CountUp = "CountUp"
-    Fixed = "Fixed"
-
-
-class CounterStartTrigger(str, Enum):
-    None_ = "None"
-    OnBattleStart = "OnBattleStart"
-    OnEnemyPhaseStart = "OnEnemyPhaseStart"
-    OnPlayerPhaseStart = "OnPlayerPhaseStart"
-    OnFirstAction = "OnFirstAction"
-
-
-class EnemyPhaseActionRule(str, Enum):
-    """
-    How enemy action + counter reload/tick is handled in enemy phase.
-    (給 battle_simulator 做流程判斷用)
-    """
-    Default = "Default"
-    ExecuteThenReload = "ExecuteThenReload"
-    ReloadThenExecute = "ReloadThenExecute"
-    ExecuteOnly = "ExecuteOnly"
-    ReloadOnly = "ReloadOnly"
-
-
-class ReloadTiming(str, Enum):
-    """
-    When to reload next action/counter.
-    """
-    AfterExecute = "AfterExecute"
-    BeforeExecute = "BeforeExecute"
-    Never = "Never"
-
-
-# =========================================================
-# Phase 1 Output (Static snapshot)
-# =========================================================
-
 @dataclass
 class CharacterSnapshot:
+    """
+    Phase 1 output (static snapshot): final base stats after level / affection etc.
+    """
     character_id: str
     final_atk: float
     final_def: float
@@ -71,26 +72,39 @@ class CharacterSnapshot:
 
 @dataclass
 class PlayerPartySnapshot:
+    """
+    Party shares ONE HP bar + ONE shield pool (MVP).
+    team_hp_max = sum(member.final_hp)
+    team_hp starts at team_hp_max unless specified otherwise.
+    """
     members: List[CharacterSnapshot]
     active_character_id: str
+
     team_hp_max: float = 0.0
     team_hp: float = 0.0
+    team_shield: float = 0.0
 
     def __post_init__(self) -> None:
-        self.team_hp_max = float(sum(m.final_hp for m in self.members))
-        self.team_hp = float(self.team_hp_max)
+        if self.team_hp_max <= 0:
+            self.team_hp_max = float(sum(m.final_hp for m in self.members))
+        if self.team_hp <= 0:
+            self.team_hp = float(self.team_hp_max)
+
+    def get_active_member(self) -> CharacterSnapshot:
+        for m in self.members:
+            if m.character_id == self.active_character_id:
+                return m
+        # fallback
+        return self.members[0]
 
 
 # =========================================================
-# Card System
+# Card
 # =========================================================
-
 class EffectType(str, Enum):
     Damage = "Damage"
-    Heal = "Heal"
     Shield = "Shield"
-    Buff = "Buff"
-    Debuff = "Debuff"
+    Heal = "Heal"
 
 
 class ScaleStat(str, Enum):
@@ -101,142 +115,132 @@ class ScaleStat(str, Enum):
 
 
 class TargetType(str, Enum):
+    # Player side targets
+    Player = "Player"
+    Self = "Self"
+
+    # Enemy side targets
     EnemySingle = "EnemySingle"
     EnemyAll = "EnemyAll"
-    Self = "Self"
-    AllySingle = "AllySingle"
-    AllyAll = "AllyAll"
 
 
 class CardLifecycle(str, Enum):
     Normal = "Normal"
     Exhaust = "Exhaust"
-    Persist = "Persist"
+    Vanish = "Vanish"
 
 
 class AfterPlayMove(str, Enum):
     Discard = "Discard"
-    Exhaust = "Exhaust"
-    KeepInHand = "KeepInHand"
+    PutBackToDrawTop = "PutBackToDrawTop"
+    PutBackToDrawBottom = "PutBackToDrawBottom"
 
 
 class OnEndTurnAction(str, Enum):
-    None_ = "None"
     Discard = "Discard"
-    Exhaust = "Exhaust"
+    KeepInHand = "KeepInHand"
 
 
 @dataclass
 class Card:
     card_id: str
-    character_id: str
-    group_id: str
-    epiphany_tier: int = 0
     ap_cost: int = 1
+
+    # Optional metadata (tolerant for your repository)
+    group_id: Optional[str] = None
+    epiphany_tier: Optional[int] = None
+    lifecycle: CardLifecycle = CardLifecycle.Normal
+    after_play_move: AfterPlayMove = AfterPlayMove.Discard
+    on_end_turn_action: OnEndTurnAction = OnEndTurnAction.Discard
 
 
 @dataclass
 class CardEffect:
     card_id: str
     effect_index: int
+
     effect_type: EffectType
-    scale_stat: ScaleStat
-    multiplier: float
-    flat_value: float
-    card_lifecycle: CardLifecycle
-    after_play_move: AfterPlayMove
-    on_end_turn_action: OnEndTurnAction
-    target: TargetType
+    target: TargetType = TargetType.EnemySingle
+
+    scale_stat: ScaleStat = ScaleStat.None_
+    multiplier: float = 0.0
+    flat_value: float = 0.0
+
+    # Optional fields (future-proof / compatible)
+    note: Optional[str] = None
 
 
 # =========================================================
-# Monster (battle_simulator dependency)
+# Monster
 # =========================================================
-
 @dataclass
 class MonsterIndex:
-    """
-    Minimal monster index info for simulator.
-    Extend as needed (rarity, tags, etc.)
-    """
     monster_id: str
-    name: Optional[str] = None
+    monster_rank: str
+    monster_weight: int = 1
 
 
 @dataclass
 class MonsterBaseStat:
     monster_id: str
-    atk: float
+    level: int
+    attack: float
     defense: float
-    hp: float
+    health: float
 
 
 class MonsterSkillType(str, Enum):
-    """
-    Enemy skill types referenced by battle_simulator.
-    """
     Attack = "Attack"
-    Heal = "Heal"
-    Buff = "Buff"
-    Debuff = "Debuff"
-    Guard = "Guard"
-    Special = "Special"
+    AddShield = "AddShield"
+
+
+class ReloadTiming(str, Enum):
+    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"
+
+
+class CounterMode(str, Enum):
+    Enabled = "Enabled"
+    Disabled = "Disabled"
+
+
+class CounterStartTrigger(str, Enum):
+    OnPlayerPlayCard = "OnPlayerPlayCard"
+
+
+class EnemyPhaseActionRule(str, Enum):
+    ActIfNotActedThisTurn = "ActIfNotActedThisTurn"
+    AlwaysAct = "AlwaysAct"
 
 
 @dataclass
 class MonsterSkill:
-    monster_id: str
     skill_id: str
+    monster_id: str
     skill_type: MonsterSkillType
+    value: float
 
-    # Core numeric params (optional / depends on sheet design)
-    multiplier: float = 1.0
-    flat_value: float = 0.0
-
-    # Counter-related fields (optional)
-    counter_mode: CounterMode = CounterMode.None_
-    counter_start_trigger: CounterStartTrigger = CounterStartTrigger.None_
-    counter_value: int = 0
-    reload_timing: ReloadTiming = ReloadTiming.AfterExecute
+    counter_max: int = 0
+    reload_timing: ReloadTiming = ReloadTiming.AfterEnemyAttackPhase
+    counter_mode: CounterMode = CounterMode.Enabled
+    counter_start_trigger: CounterStartTrigger = CounterStartTrigger.OnPlayerPlayCard
+    enemy_phase_action_rule: EnemyPhaseActionRule = EnemyPhaseActionRule.ActIfNotActedThisTurn
+    target: TargetType = TargetType.Player
 
 
 @dataclass
 class MonsterState:
-    """
-    Runtime monster state in battle simulation.
-    """
     monster_id: str
     hp: float
-    alive: bool = True
+    shield: float = 0.0
 
-    # current counter & action pointers (if your sim uses them)
     counter: int = 0
-    current_skill_id: Optional[str] = None
+    counter_max: int = 0
+    has_acted_this_turn: bool = False
 
 
 # =========================================================
-# Ability / Status (used by ability_system)
+# Battle Output
 # =========================================================
-
-class StatusType(str, Enum):
-    AttackUp = "AttackUp"
-    DefenseUp = "DefenseUp"
-    HealingUp = "HealingUp"
-    IncomingDamageDown = "IncomingDamageDown"
-
-
-@dataclass
-class StatusInstance:
-    status_type: StatusType
-    remaining_turns: int
-    params: Dict[str, Any] = field(default_factory=dict)
-    source_ability_id: Optional[str] = None
-
-
-# =========================================================
-# Battle Result
-# =========================================================
-
 @dataclass
 class BattleResult:
     battle_index: int
@@ -244,38 +248,3 @@ class BattleResult:
     turns: int
     player_hp_end: float
     enemies_alive: int
-
-
-# =========================================================
-# Utils
-# =========================================================
-
-TEnum = TypeVar("TEnum", bound=Enum)
-
-
-def parse_enum(enum_type: Type[TEnum], raw: Any, default: TEnum) -> TEnum:
-    """
-    Safe enum parser for Excel / string input.
-    """
-    if raw is None:
-        return default
-
-    if isinstance(raw, enum_type):
-        return raw
-
-    s = str(raw).strip()
-    if s == "":
-        return default
-
-    # by value
-    try:
-        return enum_type(s)  # type: ignore
-    except Exception:
-        pass
-
-    # by name
-    for e in enum_type:  # type: ignore
-        if e.name.lower() == s.lower():
-            return e
-
-    return default
