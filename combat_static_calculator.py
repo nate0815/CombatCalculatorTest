@@ -73,6 +73,115 @@ def _to_int(v: Any, default: int = 0) -> int:
 
 
 # =========================================================
+# CharacterIndex (Class lookup)
+# =========================================================
+
+class CharacterIndexTable:
+    """
+    Expect columns:
+        CharacterId, Class
+    """
+    def __init__(self, df: pd.DataFrame) -> None:
+        self.df = df.copy()
+        self.df.columns = self.df.columns.astype(str).str.strip()
+
+        self.col_id = self._pick(("CharacterId", "CharacterID", "character_id"))
+        self.col_class = self._pick(("Class", "class"))
+
+        self._class_by_id: Dict[str, str] = {}
+        for _, r in self.df.iterrows():
+            cid = _norm(r.get(self.col_id))
+            c = _norm(r.get(self.col_class))
+            if cid is None or c is None:
+                continue
+            self._class_by_id[str(cid).strip()] = str(c).strip()
+
+    def _pick(self, candidates: Tuple[str, ...]) -> str:
+        for c in candidates:
+            if c in self.df.columns:
+                return c
+        raise ValueError(f"CharacterIndex missing required columns: {candidates}. Existing={list(self.df.columns)}")
+
+    def get_class(self, character_id: str) -> Optional[str]:
+        return self._class_by_id.get(character_id)
+
+
+# =========================================================
+# PartnerLevelStat (Class + Stack bonus)
+# =========================================================
+
+@dataclass(frozen=True)
+class PartnerBonusRow:
+    partner_id: str
+    partner_class: str
+    stat_type_id: str
+    stack_vals: List[float]  # index = stack_count (0..N)
+
+
+class PartnerLevelStatTable:
+    """
+    Your sheet columns (based on screenshot):
+        PartnerId, Class, StatTypeId,
+        Stack0Val, Stack1Val, Stack2Val, Stack3Val, Stack4Value
+    """
+    def __init__(self, df: pd.DataFrame) -> None:
+        self.df = df.copy()
+        self.df.columns = self.df.columns.astype(str).str.strip()
+
+        self.col_partner_id = self._pick(("PartnerId", "PartnerID"))
+        self.col_class = self._pick(("Class",))
+        self.col_stat_type = self._pick(("StatTypeId", "StatTypeID"))
+
+        self.col_s0 = self._pick(("Stack0Val", "Stack0Value"))
+        self.col_s1 = self._pick(("Stack1Val", "Stack1Value"))
+        self.col_s2 = self._pick(("Stack2Val", "Stack2Value"))
+        self.col_s3 = self._pick(("Stack3Val", "Stack3Value"))
+        self.col_s4 = self._pick(("Stack4Value", "Stack4Val", "Stack4Value "))
+
+        self._rows_by_partner: Dict[str, PartnerBonusRow] = {}
+        for _, r in self.df.iterrows():
+            pid = _norm(r.get(self.col_partner_id))
+            pclass = _norm(r.get(self.col_class))
+            st = _norm(r.get(self.col_stat_type))
+            if pid is None or pclass is None or st is None:
+                continue
+
+            row = PartnerBonusRow(
+                partner_id=str(pid).strip(),
+                partner_class=str(pclass).strip(),
+                stat_type_id=str(st).strip(),
+                stack_vals=[
+                    _to_float(r.get(self.col_s0), 0.0),
+                    _to_float(r.get(self.col_s1), 0.0),
+                    _to_float(r.get(self.col_s2), 0.0),
+                    _to_float(r.get(self.col_s3), 0.0),
+                    _to_float(r.get(self.col_s4), 0.0),
+                ],
+            )
+            self._rows_by_partner[row.partner_id] = row
+
+    def _pick(self, candidates: Tuple[str, ...]) -> str:
+        for c in candidates:
+            if c in self.df.columns:
+                return c
+        raise ValueError(f"PartnerLevelStat missing required columns: {candidates}. Existing={list(self.df.columns)}")
+
+    def get_row(self, partner_id: str) -> Optional[PartnerBonusRow]:
+        return self._rows_by_partner.get(partner_id)
+
+    def get_partner_class(self, partner_id: str) -> Optional[str]:
+        r = self.get_row(partner_id)
+        return r.partner_class if r else None
+
+    def get_stack_bonus(self, partner_id: str, stack_count: int) -> Tuple[Optional[str], float]:
+        r = self.get_row(partner_id)
+        if r is None:
+            return None, 0.0
+        idx = max(0, min(int(stack_count), len(r.stack_vals) - 1))
+        return r.stat_type_id, float(r.stack_vals[idx])
+
+
+# =========================================================
 # Base Stat By Level helper
 # =========================================================
 
@@ -101,7 +210,6 @@ class CharacterBaseStatByLevelTable:
         self.col_def = self._pick(("Defense", "Def", "DEF", "final_def", "BaseDEF", "BaseDef"))
         self.col_hp = self._pick(("Health", "HP", "Hp", "final_hp", "BaseHP", "BaseHp"))
 
-        # index: char_id -> sorted rows by level
         self._rows_by_char: Dict[str, List[BaseStatRow]] = {}
         for _, r in self.df.iterrows():
             cid = _norm(r.get(self.col_character_id))
@@ -132,13 +240,10 @@ class CharacterBaseStatByLevelTable:
         if not rows:
             raise KeyError(f"CharacterBaseStatByLevel has no rows for CharacterId={character_id}")
 
-        # 1) exact match
         for r in rows:
             if abs(r.level - level) < 1e-6:
                 return r
 
-        # 2) interpolate between nearest levels
-        # find rightmost <= level and leftmost >= level
         lower = None
         upper = None
         for r in rows:
@@ -181,7 +286,6 @@ class AffectionByLevelTable:
         self.col_def = self._pick(("DefenseTotal", "Defense", "Def", "DEF"))
         self.col_hp = self._pick(("HealthTotal", "Health", "HP", "Hp"))
 
-
         self._map: Dict[int, Tuple[float, float, float]] = {}
         for _, r in self.df.iterrows():
             lv = _to_int(r.get(self.col_lv), 0)
@@ -211,7 +315,9 @@ class CombatStaticCalcConfig:
     sheet_character_index: str = "CharacterIndex"
     sheet_base_stat_by_level: str = "CharacterBaseStatByLevel"
 
-    # optional
+    partner_excel: str = "Partner.xlsx"
+    sheet_partner_level_stat: str = "PartnerStatStack"
+
     affection_excel: str = "Affection.xlsx"
     sheet_affection_by_level: str = "AffectionByLevel"
 
@@ -221,11 +327,15 @@ class CombatStaticCalculator:
         self.config = config
         self.verbose = verbose
 
-        # Required tables
         base_df = load_sheet(config.character_excel, config.sheet_base_stat_by_level)
         self.base_by_level = CharacterBaseStatByLevelTable(base_df)
 
-        # Optional tables
+        char_index_df = try_load_sheet(config.character_excel, config.sheet_character_index)
+        self.character_index = CharacterIndexTable(char_index_df) if char_index_df is not None else None
+
+        partner_df = try_load_sheet(config.partner_excel, config.sheet_partner_level_stat)
+        self.partner_level_stat = PartnerLevelStatTable(partner_df) if partner_df is not None else None
+
         aff_df = try_load_sheet(config.affection_excel, config.sheet_affection_by_level)
         self.affection = AffectionByLevelTable(aff_df) if aff_df is not None else None
 
@@ -234,6 +344,8 @@ class CombatStaticCalculator:
         character_id: str,
         level: float,
         affection_level: int = 0,
+        partner_id: Optional[str] = None,
+        partner_stack_count: int = 0,
     ) -> CharacterSnapshot:
         base = self.base_by_level.get(character_id, level)
 
@@ -241,18 +353,55 @@ class CombatStaticCalculator:
         defense = float(base.defense)
         hp = float(base.hp)
 
-        # Optional affection flat (your memory: Affection flat only)
+        # Affection (flat)
         if self.affection is not None and affection_level > 0:
             b_atk, b_def, b_hp = self.affection.get_bonus(affection_level)
             atk += b_atk
             defense += b_def
             hp += b_hp
 
+        # Partner bonus (only if class matches)
+        if (
+            partner_id is not None
+            and self.character_index is not None
+            and self.partner_level_stat is not None
+        ):
+            owner_class = self.character_index.get_class(character_id)
+            pclass = self.partner_level_stat.get_partner_class(partner_id)
+            is_match = (owner_class is not None and pclass is not None and owner_class == pclass)
+
+            if is_match:
+                stat_type_id, bonus = self.partner_level_stat.get_stack_bonus(partner_id, partner_stack_count)
+
+                # 你的 PartnerLevelStat 表目前是「百分比」增益（0.08~0.16）
+                # Attack/Health 直接在 Phase1 套入 snapshot
+                if stat_type_id == "PartnerAttackIncrease":
+                    atk *= (1.0 + bonus)
+                elif stat_type_id == "PartnerHealthIncrease":
+                    hp *= (1.0 + bonus)
+                elif stat_type_id == "PartnerHealingIncrease":
+                    # 治療乘區不適合進 snapshot，留給 AbilitySystem / runtime_mod
+                    # 這裡不動 atk/def/hp
+                    pass
+
+                if self.verbose:
+                    print(
+                        f"[PartnerBonus] char={character_id} class={owner_class} "
+                        f"partner={partner_id} pclass={pclass} match={is_match} "
+                        f"stack={partner_stack_count} stat={stat_type_id} bonus={bonus}"
+                    )
+            else:
+                if self.verbose:
+                    print(
+                        f"[PartnerBonus] char={character_id} class={owner_class} "
+                        f"partner={partner_id} pclass={pclass} match={is_match} (skip)"
+                    )
+
         snap = CharacterSnapshot(
             character_id=character_id,
-            final_atk=atk,
-            final_def=defense,
-            final_hp=hp,
+            final_atk=float(atk),
+            final_def=float(defense),
+            final_hp=float(hp),
             level=level,
         )
         return snap
@@ -268,16 +417,14 @@ def calc_all_character_snapshots(verbose: bool = False) -> List[CharacterSnapsho
 
     Data source:
         CombatInputPanel.xlsx / CombatInputPanel
-            - CharacterId, Level, AffectionLevel ...
+            - CharacterId, Level, PartnerId, PartnerStackCount, AffectionLevel ...
     """
-    # Read input panel (which characters to calculate)
     input_repo = RuntimeInputRepository(data_dir=DATA_DIR, log=verbose)
     inputs_by_character = input_repo.load_combat_input_panel(
         excel_name="CombatInputPanel.xlsx",
         sheet_name="CombatInputPanel",
     )
 
-    # Build calculator
     calc = CombatStaticCalculator(config=CombatStaticCalcConfig(), verbose=verbose)
 
     out: List[CharacterSnapshot] = []
@@ -286,6 +433,8 @@ def calc_all_character_snapshots(verbose: bool = False) -> List[CharacterSnapsho
             character_id=cid,
             level=float(inp.level),
             affection_level=int(inp.affection_level),
+            partner_id=inp.partner_id,
+            partner_stack_count=int(inp.partner_stack_count),
         )
         out.append(snap)
 
@@ -293,9 +442,8 @@ def calc_all_character_snapshots(verbose: bool = False) -> List[CharacterSnapsho
             print(
                 f"[Phase1] {cid} Lv={inp.level} "
                 f"ATK={snap.final_atk:.1f} DEF={snap.final_def:.1f} HP={snap.final_hp:.1f} "
-                f"(Affection={inp.affection_level})"
+                f"(Affection={inp.affection_level}, PartnerId={inp.partner_id}, Stack={inp.partner_stack_count})"
             )
 
-    # Keep stable ordering by CharacterId (deterministic)
     out.sort(key=lambda s: s.character_id)
     return out

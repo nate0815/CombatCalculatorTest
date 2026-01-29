@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional
-
+import pandas as pd
 
 def ask_int(prompt: str, default: Optional[int] = None) -> int:
     while True:
@@ -112,6 +112,49 @@ def build_ability_context_from_inputs(first_input: Any) -> Dict[str, Any]:
                 if v is not None and v != "":
                     return v
         return None
+
+    owner_class = pick("owner_class", "OwnerClass")
+    partner_class = pick("partner_class", "PartnerClass")
+    partner_id = pick("partner_id", "PartnerId")
+    stack = pick("partner_stack_count", "PartnerStackCount")
+
+    # 若 input panel 沒提供 class，改由表格推導
+    if owner_class is None or partner_class is None:
+        try:
+            base_dir = Path(__file__).parent
+            data_dir = base_dir / "Data"
+            char_df = pd.read_excel(data_dir / "Character.xlsx", sheet_name="CharacterIndex")
+            char_df.columns = char_df.columns.astype(str).str.strip()
+            partner_df = pd.read_excel(data_dir / "Partner.xlsx", sheet_name="PartnerLevelStat")
+            partner_df.columns = partner_df.columns.astype(str).str.strip()
+
+            cid = getattr(first_input, "character_id", None) or getattr(first_input, "CharacterId", None)
+            if owner_class is None and cid is not None:
+                hit = char_df[char_df["CharacterId"].astype(str) == str(cid)]
+                if len(hit) > 0:
+                    owner_class = str(hit.iloc[0]["Class"])
+
+            if partner_class is None and partner_id is not None:
+                hit = partner_df[partner_df["PartnerId"].astype(str) == str(partner_id)]
+                if len(hit) > 0:
+                    partner_class = str(hit.iloc[0]["Class"])
+        except Exception:
+            pass
+
+    if owner_class is not None:
+        ctx["owner_class"] = owner_class
+    if partner_class is not None:
+        ctx["partner_class"] = partner_class
+    if partner_id is not None:
+        ctx["partner_id"] = partner_id
+    if stack is not None:
+        try:
+            ctx["partner_stack_count"] = int(stack)
+        except Exception:
+            ctx["partner_stack_count"] = stack
+
+    return ctx
+
 
     owner_class = pick("owner_class", "OwnerClass", "character_class", "CharacterClass")
     partner_class = pick("partner_class", "PartnerClass")
@@ -302,12 +345,6 @@ def main() -> int:
 
     print(f"✅ Done.\nReport: {out}")
     return 0
-
-    print(
-    f"[PartnerBonus] char={cid} char_class={char_class} partner={pid} partner_class={pclass} "
-    f"match={is_match} sheet_flag={is_partner_bonus_applied} applied={applied}"
-    )
-
 
 
 if __name__ == "__main__":
