@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import random
 
 from models import (
@@ -105,6 +105,296 @@ class BattleSimulator:
             extra_ctx_keys=list(extra_ctx.keys()),
         )
 
+    # -----------------------------
+    # Counter runtime state helpers
+    # -----------------------------
+    def _build_skill_runtime_key(self, monster_id: str, skill: MonsterSkill) -> str:
+        # 盡量穩定：有 skill_id 用 skill_id；沒有就 fallback
+        sid = getattr(skill, "skill_id", None)
+        if sid:
+            return f"{monster_id}:{sid}"
+        return f"{monster_id}:{skill.monster_id}:{skill.skill_type.value}:{float(getattr(skill, 'counter_max', 0.0))}:{float(getattr(skill, 'value', 0.0))}"
+
+    def _init_enemy_counter_state(
+        self,
+        enemies: List[MonsterState],
+        skills_by_monster: Dict[str, List[MonsterSkill]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        runtime structure:
+            state[key] = {
+                "counter_now": int,
+                "ready": bool,
+                "counter_max": int,
+                "reload_timing": str,
+                "counter_mode": str,
+                "counter_start_trigger": str,
+                "enemy_phase_action_rule": str,
+            }
+        """
+        st: Dict[str, Dict[str, Any]] = {}
+        for e in enemies:
+            for sk in skills_by_monster.get(e.monster_id, []):
+                key = self._build_skill_runtime_key(e.monster_id, sk)
+
+                counter_max = int(getattr(sk, "counter_max", 0) or 0)
+                if counter_max <= 0:
+                    # 沒有 counter 的技能，當作永遠不會 ready（可改成 always ready，但你目前表格是 counter 驅動）
+                    counter_max = 0
+
+                st[key] = {
+                    "counter_now": counter_max,
+                    "ready": False,
+                    "counter_max": counter_max,
+                    "reload_timing": str(getattr(sk, "reload_timing", "") or ""),
+                    "counter_mode": str(getattr(sk, "counter_mode", "") or ""),
+                    "counter_start_trigger": str(getattr(sk, "counter_start_trigger", "") or ""),
+                    "enemy_phase_action_rule": str(getattr(sk, "enemy_phase_action_rule", "") or ""),
+                }
+        return st
+
+    def _is_counter_enabled(self, sk: MonsterSkill) -> bool:
+        # 兼容 enum / string
+        mode = getattr(sk, "counter_mode", None)
+        if mode is None:
+            return False
+        try:
+            # enum
+            return str(mode.value).lower() == "enabled"
+        except Exception:
+            return str(mode).lower() == "enabled"
+
+    def _is_trigger_on_player_play_card(self, sk: MonsterSkill) -> bool:
+        t = getattr(sk, "counter_start_trigger", None)
+        if t is None:
+            return False
+        try:
+            return str(t.value) == "OnPlayerPlayCard"
+        except Exception:
+            return str(t) == "OnPlayerPlayCard"
+
+    def _enemy_phase_rule_act_if_not_acted_this_turn(self, sk: MonsterSkill) -> bool:
+        r = getattr(sk, "enemy_phase_action_rule", None)
+        if r is None:
+            return True
+        try:
+            return str(r.value) == "ActIfNotActedThisTurn"
+        except Exception:
+            return str(r) == "ActIfNotActedThisTurn"
+
+    def _reload_after_enemy_attack_phase(self, sk: MonsterSkill) -> bool:
+        rt = getattr(sk, "reload_timing", None)
+        if rt is None:
+            return False
+        try:
+            return str(rt.value) == "AfterEnemyAttackPhase"
+        except Exception:
+            return str(rt) == "AfterEnemyAttackPhase"
+
+    def _tick_counters_on_player_play_card(
+        self,
+        *,
+        battle_index: int,
+        turn: int,
+        enemies: List[MonsterState],
+        skills_by_monster: Dict[str, List[MonsterSkill]],
+        counter_state: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """
+        你要的語意：
+        - 玩家出牌時，只做 counter 推進
+        - counter 歸零 => 標記 ready
+        - 不能在玩家回合直接執行技能
+        - 不能在玩家回合 reload
+        """
+        for e in enemies:
+            if e.is_dead():
+                continue
+
+            # 若怪物本回合已行動，且規則是 ActIfNotActedThisTurn，則不推進（避免同回合重複蓄力）
+            # 這點可以依你想要的調整：若你希望「即使已行動，也照樣蓄力下一招」，把這段拿掉即可
+            for sk in skills_by_monster.get(e.monster_id, []):
+                if not self._is_counter_enabled(sk):
+                    continue
+                if not self._is_trigger_on_player_play_card(sk):
+                    continue
+
+                if self._enemy_phase_rule_act_if_not_acted_this_turn(sk) and getattr(e, "acted_this_turn", False):
+                    continue
+
+                key = self._build_skill_runtime_key(e.monster_id, sk)
+                st = counter_state.get(key)
+                if not st:
+                    continue
+
+                cmax = int(st.get("counter_max", 0))
+                if cmax <= 0:
+                    continue
+
+                if st.get("ready", False):
+                    # 已 ready 就不要再扣，避免負數與重覆 ready
+                    continue
+
+                cnow = int(st.get("counter_now", cmax))
+                cnow -= 1
+                st["counter_now"] = cnow
+
+                self._event(
+                    battle_index,
+                    turn,
+                    "EnemyCounter",
+                    "Tick",
+                    f"{e.monster_id} skill={getattr(sk, 'skill_type', 'Unknown')} counter {cnow}/{cmax}",
+                )
+
+                if cnow <= 0:
+                    st["ready"] = True
+                    self._event(
+                        battle_index,
+                        turn,
+                        "EnemyCounter",
+                        "Ready",
+                        f"{e.monster_id} skill={getattr(sk, 'skill_type', 'Unknown')} is READY (will execute in EnemyPhase)",
+                    )
+
+    def _execute_ready_skill_in_enemy_phase(
+        self,
+        *,
+        battle_index: int,
+        turn: int,
+        enemy: MonsterState,
+        team_hp_now: float,
+        team_hp_max: float,
+        extra_ctx: Dict[str, Any],
+        runtime_mod: Dict[str, Any],
+        monster_base_stats: Dict[str, MonsterBaseStat],
+        skills_by_monster: Dict[str, List[MonsterSkill]],
+        counter_state: Dict[str, Dict[str, Any]],
+    ) -> Tuple[float, bool]:
+        """
+        回傳： (team_hp_now, did_act)
+        - 每個 enemy phase，通常只讓怪物執行一個 READY skill（符合 ActIfNotActedThisTurn）
+        """
+        if enemy.is_dead():
+            return team_hp_now, False
+
+        ready_skills: List[MonsterSkill] = []
+        for sk in skills_by_monster.get(enemy.monster_id, []):
+            key = self._build_skill_runtime_key(enemy.monster_id, sk)
+            st = counter_state.get(key)
+            if not st:
+                continue
+            if not st.get("ready", False):
+                continue
+            ready_skills.append(sk)
+
+        if not ready_skills:
+            return team_hp_now, False
+
+        # 決定要放哪一招：目前採用「表格順序第一個 READY」
+        sk = ready_skills[0]
+
+        # 若規則是 ActIfNotActedThisTurn 且已行動過，則不出招
+        if self._enemy_phase_rule_act_if_not_acted_this_turn(sk) and getattr(enemy, "acted_this_turn", False):
+            return team_hp_now, False
+
+        # ---- Execute ----
+        if sk.skill_type == MonsterSkillType.Attack:
+            damage = float(getattr(sk, "value", 0.0) or 0.0)
+            if damage <= 0:
+                bs = monster_base_stats[enemy.monster_id]
+                damage = float(bs.attack)
+
+            # Arwen mitigation hook
+            before_points = int(extra_ctx.get("arwen_points", 0))
+
+            self._trigger_ability(
+                battle_index=battle_index,
+                turn=turn,
+                trigger=TriggerEvent.OnEnemyAttack,
+                extra_ctx=extra_ctx,
+                runtime_mod=runtime_mod,
+                source_desc=f"OnEnemyAttack monster={enemy.monster_id}",
+            )
+
+            inc_mul = float(runtime_mod.get("incoming_damage_multiplier", 1.0))
+            after_points = int(extra_ctx.get("arwen_points", 0))
+
+            # 保底：如果表/能力沒動到 incoming_damage_multiplier，但點數>0，仍然扣點並套 0.9
+            if inc_mul >= 0.9999 and before_points > 0 and after_points == before_points:
+                extra_ctx["arwen_points"] = before_points - 1
+                inc_mul = 0.9
+
+            self._event(
+                battle_index,
+                turn,
+                "Arwen",
+                "OnEnemyAttack",
+                f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
+            )
+
+            team_hp_now -= damage * inc_mul
+            self._event(
+                battle_index,
+                turn,
+                "Enemy",
+                "Attack",
+                f"{enemy.monster_id} attack {damage:.2f} * {inc_mul:.2f} => team_hp={team_hp_now:.2f}/{team_hp_max:.2f}",
+            )
+
+            # reset per hit
+            runtime_mod["incoming_damage_multiplier"] = 1.0
+
+        elif sk.skill_type == MonsterSkillType.AddShield:
+            val = float(getattr(sk, "value", 0.0) or 0.0)
+            # MonsterState 不一定有 shield_now，安全寫入
+            cur = float(getattr(enemy, "shield_now", 0.0) or 0.0)
+            cur2 = cur + val
+            try:
+                setattr(enemy, "shield_now", cur2)
+            except Exception:
+                # 若 MonsterState frozen 或不允許 setattr，就只能略過
+                pass
+
+            self._event(
+                battle_index,
+                turn,
+                "Enemy",
+                "AddShield",
+                f"{enemy.monster_id} add shield +{val:.2f} (shield={cur2:.2f})",
+            )
+
+        else:
+            # 其他技能先記錄，避免無聲失敗
+            self._event(
+                battle_index,
+                turn,
+                "Enemy",
+                "Skill",
+                f"{enemy.monster_id} execute skill_type={sk.skill_type} (not implemented)",
+            )
+
+        # ---- Mark acted ----
+        enemy.acted_this_turn = True
+
+        # ---- Reload (依 ReloadTiming) ----
+        if self._reload_after_enemy_attack_phase(sk):
+            key = self._build_skill_runtime_key(enemy.monster_id, sk)
+            st = counter_state.get(key)
+            if st:
+                st["ready"] = False
+                st["counter_now"] = int(st.get("counter_max", 0))
+
+                self._event(
+                    battle_index,
+                    turn,
+                    "EnemyCounter",
+                    "Reload",
+                    f"{enemy.monster_id} skill={getattr(sk, 'skill_type', 'Unknown')} reload counter to {st['counter_now']}",
+                )
+
+        return team_hp_now, True
+
     def run_battles(
         self,
         *,
@@ -157,7 +447,7 @@ class BattleSimulator:
         team_hp_max = float(party.team_hp_max)
         team_hp_now = float(party.team_hp_now)
 
-        # enemy_count：每場隨機 1~3
+        # enemy_count：每場隨機 1~3（你若要固定每場 3 隻，把這行改成 enemy_count = min(3, len(monster_indexes))）
         enemy_count = random.randint(1, min(3, max(1, len(monster_indexes))))
 
         # weighted pool by monster_weight
@@ -171,10 +461,13 @@ class BattleSimulator:
             bs = monster_base_stats[mid]
             enemies.append(MonsterState(monster_id=mid, hp_now=float(bs.health)))
 
-        # skills map
+        # skills map（保持表格順序）
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for s in monster_skills:
             skills_by_monster.setdefault(s.monster_id, []).append(s)
+
+        # counter runtime state
+        counter_state = self._init_enemy_counter_state(enemies, skills_by_monster)
 
         # ability contexts
         extra_ctx: Dict[str, Any] = dict(ability_extra_ctx)
@@ -231,6 +524,15 @@ class BattleSimulator:
                     source_desc=f"OnPlayCard card={card.card_id}",
                 )
 
+                # ✅ 你要的 counter 語意：玩家出牌只推 counter / 變 ready，不執行技能、不 reload
+                self._tick_counters_on_player_play_card(
+                    battle_index=battle_index,
+                    turn=turn,
+                    enemies=enemies,
+                    skills_by_monster=skills_by_monster,
+                    counter_state=counter_state,
+                )
+
                 for eff in effects:
                     active = party.members[0]
 
@@ -258,6 +560,7 @@ class BattleSimulator:
                         if tgt is None:
                             break
 
+                        # 若你未來有盾，這裡可先扣 shield 再扣 hp
                         tgt.hp_now -= float(value)
                         self._event(
                             battle_index,
@@ -303,51 +606,18 @@ class BattleSimulator:
                 if e.is_dead():
                     continue
 
-                bs = monster_base_stats[e.monster_id]
-                s_list = skills_by_monster.get(e.monster_id, [])
-                attack_skill = next((s for s in s_list if s.skill_type == MonsterSkillType.Attack), None)
-                damage = float(attack_skill.value if attack_skill else bs.attack)
-
-                # ---- Arwen mitigation ----
-                before_points = int(extra_ctx.get("arwen_points", 0))
-
-                self._trigger_ability(
+                team_hp_now, did_act = self._execute_ready_skill_in_enemy_phase(
                     battle_index=battle_index,
                     turn=turn,
-                    trigger=TriggerEvent.OnEnemyAttack,
+                    enemy=e,
+                    team_hp_now=team_hp_now,
+                    team_hp_max=team_hp_max,
                     extra_ctx=extra_ctx,
                     runtime_mod=runtime_mod,
-                    source_desc=f"OnEnemyAttack monster={e.monster_id}",
+                    monster_base_stats=monster_base_stats,
+                    skills_by_monster=skills_by_monster,
+                    counter_state=counter_state,
                 )
-
-                inc_mul = float(runtime_mod.get("incoming_damage_multiplier", 1.0))
-                after_points = int(extra_ctx.get("arwen_points", 0))
-
-                # 保底：如果表/能力沒動到 incoming_damage_multiplier，但點數>0，仍然扣點並套 0.9
-                if inc_mul >= 0.9999 and before_points > 0 and after_points == before_points:
-                    extra_ctx["arwen_points"] = before_points - 1
-                    inc_mul = 0.9
-
-                # 每次都印，便於 Excel/Reporter 抓行為
-                self._event(
-                    battle_index,
-                    turn,
-                    "Arwen",
-                    "OnEnemyAttack",
-                    f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
-                )
-
-                team_hp_now -= damage * inc_mul
-                self._event(
-                    battle_index,
-                    turn,
-                    "Enemy",
-                    "Attack",
-                    f"{e.monster_id} attack {damage:.2f} * {inc_mul:.2f} => team_hp={team_hp_now:.2f}/{team_hp_max:.2f}",
-                )
-
-                # reset per hit
-                runtime_mod["incoming_damage_multiplier"] = 1.0
 
                 if team_hp_now <= 0:
                     alive = sum(1 for x in enemies if not x.is_dead())
@@ -359,6 +629,10 @@ class BattleSimulator:
                         enemies_alive=alive,
                         extra={"enemy_count": enemy_count},
                     )
+
+            # 如果這回合怪物都沒有 ready 技能，是否要做「預設普通攻擊」？
+            # 你的表格目前每隻怪都有 Attack counter，所以通常不會發生。
+            # 若你希望永遠每回合怪物都能打，請在這裡加 fallback 行為。
 
         alive = sum(1 for x in enemies if not x.is_dead())
         return BattleResult(
