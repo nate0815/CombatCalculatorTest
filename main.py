@@ -99,7 +99,6 @@ def try_load_ability_system(data_dir: Path) -> Optional[Any]:
             continue
         except Exception:
             continue
-
     return None
 
 
@@ -140,8 +139,7 @@ def main() -> int:
     REPORT_DIR = BASE_DIR / "Reports"
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 你要的互動（只保留這兩個）
-    battle_count = ask_int("要模擬幾場 battle？", default=1)
+    battle_count = ask_int("要模擬幾場 battle？", default=100)
     log_level_str = ask_choice("log 等級？", ["INFO", "DEBUG", "TRACE"], default="TRACE")
 
     print("\n--- 設定確認 ---")
@@ -149,11 +147,12 @@ def main() -> int:
     print(f"battle_count: {battle_count}")
     print(f"log_level: {log_level_str}")
 
-    if not ask_yes_no("是否開始執行？", default="n"):
+    # 你剛剛那張截圖的流程是一路跑下去，不需要再多一層「是否開始」
+    # 但保留這個詢問讓你避免誤按
+    if not ask_yes_no("是否開始執行？", default="y"):
         print("已取消。")
         return 0
 
-    # imports
     from runtime_input_repository import RuntimeInputRepository
     from combat_static_calculator import calc_all_character_snapshots
     from card_repository import CardRepository
@@ -164,7 +163,7 @@ def main() -> int:
     reporter = None
     try:
         from battle_reporter import BattleReporter  # type: ignore
-        # TRACE/DEBUG 才需要 event log
+
         enable_event_log = log_level_str in ("DEBUG", "TRACE")
         reporter = BattleReporter(report_dir=REPORT_DIR, enable_event_log=enable_event_log)
     except Exception:
@@ -185,7 +184,6 @@ def main() -> int:
 
     party_char_ids = list(inputs_by_char.keys())
     active_character_id = party_char_ids[0]
-
     print(f"[Main] Party: {', '.join(party_char_ids)} (active={active_character_id})")
 
     # Phase 1 snapshots
@@ -233,7 +231,7 @@ def main() -> int:
     # Simulator + Config
     from battle_simulator import BattleConfig, BattleSimulator  # type: ignore
 
-    cfg = BattleConfig(battle_count=battle_count)  # seed/max_turns 用預設，不讓使用者選
+    cfg = BattleConfig(battle_count=battle_count)
     simulator = BattleSimulator(
         ability_system=ability_system,
         reporter=reporter,
@@ -241,7 +239,6 @@ def main() -> int:
     )
 
     print("\n[Main] Start simulating...\n")
-
     results = simulator.run_battles(
         config=cfg,
         party=party_snapshot,
@@ -253,7 +250,7 @@ def main() -> int:
         ability_extra_ctx=ability_ctx,
     )
 
-    # Summary
+    # Summary rows
     for r in results:
         safe_add_summary(
             reporter,
@@ -263,8 +260,38 @@ def main() -> int:
                 "turns": getattr(r, "turns", None),
                 "player_hp_end": getattr(r, "player_hp_end", None),
                 "enemies_alive": getattr(r, "enemies_alive", None),
+                "extra": getattr(r, "extra", None),
             },
         )
+
+    # Win/Loss summary (terminal + EventLog/Config)
+    player_win = sum(1 for r in results if getattr(r, "winner", "") == "Player")
+    enemy_win = sum(1 for r in results if getattr(r, "winner", "") == "Enemy")
+    timeout = sum(1 for r in results if getattr(r, "winner", "") == "Timeout")
+    total = len(results)
+
+    summary_line = f"[Result] PlayerWins={player_win} EnemyWins={enemy_win} Timeout={timeout} Total={total}"
+    print("\n" + summary_line + "\n")
+
+    safe_add_config(reporter, "result_player_wins", player_win)
+    safe_add_config(reporter, "result_enemy_wins", enemy_win)
+    safe_add_config(reporter, "result_timeout", timeout)
+    safe_add_config(reporter, "result_total", total)
+
+    # 寫入 EventLog（如果 enable_event_log=false 也不會爆，reporter 會忽略）
+    if reporter is not None and hasattr(reporter, "add_event"):
+        try:
+            reporter.add_event(
+                {
+                    "battle_index": 0,
+                    "turn": 0,
+                    "actor": "System",
+                    "event_type": "ResultSummary",
+                    "message": summary_line,
+                }
+            )
+        except Exception:
+            pass
 
     out = None
     if reporter is not None:
@@ -273,7 +300,7 @@ def main() -> int:
         elif hasattr(reporter, "flush"):
             out = reporter.flush()
 
-    print(f"✅ Done. Report: {out}")
+    print(f"✅ Done.\nReport: {out}")
     return 0
 
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import random
 
 from models import (
@@ -17,7 +17,6 @@ from models import (
     MonsterSkillType,
     MonsterState,
     PlayerPartySnapshot,
-    TargetType,
 )
 
 from ability_models import TriggerEvent
@@ -44,9 +43,6 @@ class BattleSimulator:
         self.reporter = reporter
         self.log_level = log_level
 
-    # ----------------------------
-    # Internal logging helper
-    # ----------------------------
     def _event(
         self,
         battle_index: int,
@@ -70,9 +66,6 @@ class BattleSimulator:
         if self.log_level in (LogLevel.DEBUG, LogLevel.TRACE):
             print(f"[B{battle_index} T{turn}] {actor} {event_type}: {message}")
 
-    # ----------------------------
-    # Ability trigger wrapper
-    # ----------------------------
     def _trigger_ability(
         self,
         battle_index: int,
@@ -85,7 +78,6 @@ class BattleSimulator:
         if not self.ability_system:
             return
 
-        # reporter patterns want these lines
         dmg_mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
         heal_mul = float(runtime_mod.get("healing_multiplier", 1.0))
         self._event(
@@ -113,9 +105,6 @@ class BattleSimulator:
             extra_ctx_keys=list(extra_ctx.keys()),
         )
 
-    # ----------------------------
-    # Battle entry
-    # ----------------------------
     def run_battles(
         self,
         *,
@@ -126,13 +115,13 @@ class BattleSimulator:
         monster_indexes: List[MonsterIndex],
         monster_base_stats: Dict[str, MonsterBaseStat],
         monster_skills: List[MonsterSkill],
-        # injected context from main/runtime_input (for ability condition)
         ability_extra_ctx: Optional[Dict[str, Any]] = None,
     ) -> List[BattleResult]:
         random.seed(config.seed)
         results: List[BattleResult] = []
 
-        for bi in range(config.battle_count):
+        # battle_index 從 1 開始
+        for bi in range(1, config.battle_count + 1):
             r = self._run_one_battle(
                 battle_index=bi,
                 cfg=config,
@@ -161,41 +150,48 @@ class BattleSimulator:
         monster_skills: List[MonsterSkill],
         ability_extra_ctx: Dict[str, Any],
     ) -> BattleResult:
-        # clone party hp (MVP: shared HP bar)
         team_hp_max = float(party.team_hp_max)
         team_hp_now = float(party.team_hp_now)
 
-        # choose monsters by weight (MVP: pick 1~3)
-        # 你 Arwen 的點數會依「敵人數量」決定，所以這裡保持多敵人情境
-        enemy_count = min(3, max(1, len(monster_indexes)))
+        # enemy_count：每場隨機 1~3（符合「依敵人數量拿點數」的測試需求）
+        enemy_count = random.randint(1, min(3, max(1, len(monster_indexes))))
+
         pool: List[str] = []
         for m in monster_indexes:
             pool += [m.monster_id] * max(1, int(m.monster_weight))
-        chosen_ids = [random.choice(pool) for _ in range(enemy_count)]
 
+        chosen_ids = [random.choice(pool) for _ in range(enemy_count)]
         enemies: List[MonsterState] = []
         for mid in chosen_ids:
             bs = monster_base_stats[mid]
             enemies.append(MonsterState(monster_id=mid, hp_now=float(bs.health)))
 
-        # build skill map
+        # skills map
         skills_by_monster: Dict[str, List[MonsterSkill]] = {}
         for s in monster_skills:
             skills_by_monster.setdefault(s.monster_id, []).append(s)
 
         # ability contexts
-        extra_ctx: Dict[str, Any] = dict(ability_extra_ctx)  # persistent
+        extra_ctx: Dict[str, Any] = dict(ability_extra_ctx)
         runtime_mod: Dict[str, Any] = {
             "player_damage_multiplier": 1.0,
             "healing_multiplier": 1.0,
-            "incoming_damage_multiplier": 1.0,  # for Arwen consume-point mitigation
+            "incoming_damage_multiplier": 1.0,
         }
 
-        # ---------- BattleStart trigger ----------
-        # Arwen: init points based on enemy count (max 3) — 你之前也確認是「開戰一次」
+        # ---------- BattleStart ----------
         extra_ctx.setdefault("enemy_count", enemy_count)
-        extra_ctx.setdefault("arwen_points", min(3, int(enemy_count)))
-        self._event(battle_index, 0, "Arwen", "Init", f"[Arwen] Init points={extra_ctx['arwen_points']}")
+
+        # 你要的版本：依敵人數量，最多 3 點（開戰一次）
+        extra_ctx["arwen_points"] = min(3, int(enemy_count))
+
+        self._event(
+            battle_index,
+            0,
+            "Arwen",
+            "Init",
+            f"[Arwen] Init points={extra_ctx['arwen_points']}",
+        )
 
         self._trigger_ability(
             battle_index=battle_index,
@@ -211,19 +207,16 @@ class BattleSimulator:
         while turn < cfg.max_turns:
             turn += 1
 
-            # reset per-turn flags
             for e in enemies:
                 e.acted_this_turn = False
 
             # ========== Player Phase ==========
             if not party_cards:
-                # no cards => skip
                 self._event(battle_index, turn, "Player", "NoCard", "No card to play.")
             else:
                 card = random.choice(party_cards)
                 effects = effects_by_card_id.get(card.card_id, [])
 
-                # trigger ability on play card
                 self._trigger_ability(
                     battle_index=battle_index,
                     turn=turn,
@@ -233,22 +226,19 @@ class BattleSimulator:
                     source_desc=f"OnPlayCard card={card.card_id}",
                 )
 
-                # apply effects
                 for eff in effects:
-                    # compute base using first member as active (MVP)
                     active = party.members[0]
-                    base = 0.0
+
                     if eff.scale_stat.value == "ATK":
                         base = float(active.final_atk)
                     elif eff.scale_stat.value == "DEF":
                         base = float(active.final_def)
-                    elif eff.scale_stat.value == "HP":
+                    else:
                         base = float(team_hp_max)
 
                     value = base * float(eff.multiplier) + float(eff.flat_value)
 
                     if eff.effect_type == EffectType.Damage:
-                        # Douglas-like outgoing multiplier
                         dmg_mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
                         self._event(
                             battle_index,
@@ -257,12 +247,12 @@ class BattleSimulator:
                             "Apply",
                             f"[Ability] Apply player_damage_multiplier={dmg_mul} to damage value",
                         )
-                        value = value * dmg_mul
+                        value *= dmg_mul
 
-                        # target first alive enemy
                         tgt = next((x for x in enemies if not x.is_dead()), None)
                         if tgt is None:
                             break
+
                         tgt.hp_now -= float(value)
                         self._event(
                             battle_index,
@@ -281,7 +271,8 @@ class BattleSimulator:
                             "Apply",
                             f"[Ability] Apply healing_multiplier={heal_mul} to heal value",
                         )
-                        value = value * heal_mul
+                        value *= heal_mul
+
                         team_hp_now = min(team_hp_max, team_hp_now + float(value))
                         self._event(
                             battle_index,
@@ -291,11 +282,7 @@ class BattleSimulator:
                             f"PlayCard {card.card_id} heal {value:.2f} (team_hp={team_hp_now:.2f}/{team_hp_max:.2f})",
                         )
 
-                    elif eff.effect_type == EffectType.Shield:
-                        # MVP ignore shield (or keep for later)
-                        self._event(battle_index, turn, "Player", "Shield", f"Shield effect {value:.2f} (ignored in MVP)")
-
-            # check win after player phase
+            # win check
             if all(e.is_dead() for e in enemies):
                 return BattleResult(
                     battle_index=battle_index,
@@ -312,14 +299,13 @@ class BattleSimulator:
                     continue
 
                 bs = monster_base_stats[e.monster_id]
-                # find a simple attack skill (MVP)
                 s_list = skills_by_monster.get(e.monster_id, [])
                 attack_skill = next((s for s in s_list if s.skill_type == MonsterSkillType.Attack), None)
                 damage = float(attack_skill.value if attack_skill else bs.attack)
 
-                # Arwen: consume point on being attacked -> set incoming_damage_multiplier
-                # NOTE: ability_system has TriggerEvent.OnEnemyAttack for data-driven version
-                # Here we also keep a simple fallback:
+                # ---- Arwen mitigation ----
+                before_points = int(extra_ctx.get("arwen_points", 0))
+
                 self._trigger_ability(
                     battle_index=battle_index,
                     turn=turn,
@@ -330,15 +316,21 @@ class BattleSimulator:
                 )
 
                 inc_mul = float(runtime_mod.get("incoming_damage_multiplier", 1.0))
-                if inc_mul < 0.9999:
-                    # reporter wants this pattern
-                    self._event(
-                        battle_index,
-                        turn,
-                        "Arwen",
-                        "OnEnemyAttack",
-                        f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
-                    )
+                after_points = int(extra_ctx.get("arwen_points", 0))
+
+                # 保底：如果表/能力沒動到 incoming_damage_multiplier，但點數>0，仍然扣點並套 0.9
+                if inc_mul >= 0.9999 and before_points > 0 and after_points == before_points:
+                    extra_ctx["arwen_points"] = before_points - 1
+                    inc_mul = 0.9
+
+                # 重點：每次都印，讓 battle_reporter 可以抓到 points/mul
+                self._event(
+                    battle_index,
+                    turn,
+                    "Arwen",
+                    "OnEnemyAttack",
+                    f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
+                )
 
                 team_hp_now -= damage * inc_mul
                 self._event(
@@ -349,7 +341,6 @@ class BattleSimulator:
                     f"{e.monster_id} attack {damage:.2f} * {inc_mul:.2f} => team_hp={team_hp_now:.2f}/{team_hp_max:.2f}",
                 )
 
-                # reset incoming mul to 1 each hit (so next hit re-evaluates)
                 runtime_mod["incoming_damage_multiplier"] = 1.0
 
                 if team_hp_now <= 0:
@@ -363,7 +354,6 @@ class BattleSimulator:
                         extra={"enemy_count": enemy_count},
                     )
 
-        # max turns reached
         alive = sum(1 for x in enemies if not x.is_dead())
         return BattleResult(
             battle_index=battle_index,
