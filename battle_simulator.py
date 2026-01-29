@@ -5,15 +5,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import random
 
-from battle_reporter import BattleReporter
 from models import (
     BattleResult,
     Card,
     CardEffect,
-    CounterMode,
-    CounterStartTrigger,
     EffectType,
-    EnemyPhaseActionRule,
     LogLevel,
     MonsterBaseStat,
     MonsterIndex,
@@ -21,831 +17,359 @@ from models import (
     MonsterSkillType,
     MonsterState,
     PlayerPartySnapshot,
-    ReloadTiming,
-    ScaleStat,
     TargetType,
 )
 
 from ability_models import TriggerEvent
+from ability_system import AbilitySystem
+from battle_reporter import BattleReporter
 
 
-@dataclass
+@dataclass(frozen=True)
 class BattleConfig:
-    ap_max: int = 3
-    max_turns: int = 999
-    log_level: LogLevel = LogLevel.INFO
-
-    # kept for backward compatibility with main.py
-    # 舊版語意：當下一張卡牌費用 > 剩餘 AP 時，停止玩家階段
-    # 新版抽手牌邏輯下：我們會改成「沒有可出的牌就結束玩家階段」
-    stop_when_insufficient_ap: bool = True
-
-    # 新增：每回合抽牌數
-    hand_size: int = 5
-
-    # 可選：固定亂數種子方便重現
-    rng_seed: Optional[int] = None
-
-
-class BattleLogger:
-    def __init__(self, level: LogLevel) -> None:
-        self.level = level
-
-    def info(self, msg: str) -> None:
-        if self.level in (LogLevel.INFO, LogLevel.DEBUG, LogLevel.TRACE):
-            print(msg)
-
-    def debug(self, msg: str) -> None:
-        if self.level in (LogLevel.DEBUG, LogLevel.TRACE):
-            print(msg)
-
-    def trace(self, msg: str) -> None:
-        if self.level == LogLevel.TRACE:
-            print(msg)
-
-
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def apply_damage(hp: float, shield: float, dmg: float) -> Tuple[float, float]:
-    """Damage consumes shield first, then hp."""
-    if dmg <= 0:
-        return max(0.0, hp), max(0.0, shield)
-
-    remaining = dmg
-    if shield > 0:
-        used = min(shield, remaining)
-        shield -= used
-        remaining -= used
-
-    if remaining > 0:
-        hp -= remaining
-
-    return max(0.0, hp), max(0.0, shield)
-
-
-def pick_enemy_single(
-    monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]]
-) -> Optional[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]]:
-    alive = [(mi, ms, st) for (mi, ms, st) in monsters if st.hp > 0]
-    if not alive:
-        return None
-    # Highest weight first, stable by monster_id
-    alive.sort(key=lambda x: (-x[0].monster_weight, x[0].monster_id))
-    return alive[0]
+    battle_count: int = 1
+    seed: int = 123
+    max_turns: int = 50
 
 
 class BattleSimulator:
-    """
-    MVP 戰鬥流程包含:
-    - 隊伍共用血條 (PlayerPartySnapshot.team_hp / team_hp_max)
-    - 隊伍共用護盾池 (PlayerPartySnapshot.team_shield)
-    - AP 系統 (最大 AP=3)，每張卡牌依 Card.ap_cost 消耗
-    - 抽牌/棄牌/洗牌:
-      1) 初始全部卡牌進 Draw Pile
-      2) 玩家回合開始抽 hand_size 張
-      3) 每次出牌：先看 AP -> 找出手牌中可出卡 -> 隨機挑 1 張打出
-      4) 若沒有可出卡(手牌都太貴/手牌為空/AP不足) -> 結束玩家階段
-      5) 回合結束：手牌剩餘全部丟棄牌堆
-      6) 抽牌時 Draw 不足：把 Discard 洗回 Draw
-    - 計數器觸發: 玩家打出任意卡牌時 (OnPlayerPlayCard)
-    - 反應機制: 若玩家階段計數器歸零且怪物尚未行動 => 立即行動一次
-    - 敵方階段規則 (ActIfNotActedThisTurn):
-      若本回合尚未行動且 counter > 0 => 在敵方階段行動一次
-    - 重置時機 (AfterEnemyAttackPhase):
-      怪物本回合行動後，於敵方階段結束時重置計數器
-
-    ★ Ability Hook：
-    - BattleStart：每場戰鬥開始時觸發一次（亞玟點數初始化）
-    - Turn1 開始時觸發 FirstTurnStart（每場戰鬥只在第一回合觸發）
-    - OnEnemyAttack：每次怪物攻擊前觸發（亞玟扣點數並減傷）
-    - AbilitySystem 透過 runtime_mod:
-        player_damage_multiplier：影響本回合出牌傷害
-        healing_multiplier：影響本回合治療量
-        incoming_damage_multiplier：影響本次受擊傷害（怪物攻擊）
-    """
-
-    def __init__(self, config: BattleConfig, reporter: BattleReporter) -> None:
-        self.config = config
+    def __init__(
+        self,
+        *,
+        ability_system: Optional[AbilitySystem] = None,
+        reporter: Optional[BattleReporter] = None,
+        log_level: LogLevel = LogLevel.INFO,
+    ) -> None:
+        self.ability_system = ability_system
         self.reporter = reporter
-        self.log = BattleLogger(config.log_level)
-        self._rng = random.Random(config.rng_seed)
-
-    # =========================================================
-    # Public
-    # =========================================================
-
-    def run_many(
-        self,
-        battle_count: int,
-        party: PlayerPartySnapshot,
-        party_cards: List[Card],
-        card_effects_by_id: Dict[str, List[CardEffect]],
-        monster_indexes: List[MonsterIndex],
-        monster_base_stats: Dict[str, MonsterBaseStat],
-        monster_skills: List[MonsterSkill],
-        ability_system: Optional[Any] = None,
-        ability_context: Optional[Dict[str, Any]] = None,
-    ) -> List[BattleResult]:
-        results: List[BattleResult] = []
-        for i in range(1, battle_count + 1):
-            # 每場 battle 有獨立亂數序列（但仍可重現）
-            if self.config.rng_seed is not None:
-                self._rng = random.Random(self.config.rng_seed + i)
-
-            res = self.run_single(
-                battle_index=i,
-                party=party,
-                party_cards=party_cards,
-                card_effects_by_id=card_effects_by_id,
-                monster_indexes=monster_indexes,
-                monster_base_stats=monster_base_stats,
-                monster_skills=monster_skills,
-                ability_system=ability_system,
-                ability_context=ability_context,
-            )
-            results.append(res)
-        return results
-
-    def run_single(
-        self,
-        battle_index: int,
-        party: PlayerPartySnapshot,
-        party_cards: List[Card],
-        card_effects_by_id: Dict[str, List[CardEffect]],
-        monster_indexes: List[MonsterIndex],
-        monster_base_stats: Dict[str, MonsterBaseStat],
-        monster_skills: List[MonsterSkill],
-        ability_system: Optional[Any] = None,
-        ability_context: Optional[Dict[str, Any]] = None,
-    ) -> BattleResult:
-        # NOTE: ability_context is shared across triggers in this battle
-        ability_context = dict(ability_context or {})
-        ability_context.setdefault("extra_ctx", {})
-        ability_context.setdefault("statuses", [])
-
-        # --------------------------
-        # Init party runtime state
-        # --------------------------
-        party_runtime = PlayerPartySnapshot(
-            members=party.members,
-            active_character_id=party.active_character_id,
-        )
-        party_runtime.team_shield = 0.0  # 重置護盾
-        active_member = party_runtime.get_active_member()
-
-        # --------------------------
-        # Build monsters runtime
-        # --------------------------
-        skills_by_monster: Dict[str, List[MonsterSkill]] = {}
-        for sk in monster_skills:
-            skills_by_monster.setdefault(sk.monster_id, []).append(sk)
-        for mid in skills_by_monster:
-            # 讓技能順序可預期
-            skills_by_monster[mid].sort(key=lambda s: s.skill_id)
-
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]] = []
-        for mi in monster_indexes:
-            base = monster_base_stats.get(mi.monster_id)
-            if base is None:
-                raise ValueError(f"❌ Missing MonsterBaseStat for MonsterId={mi.monster_id}")
-
-            # MVP: 選取第一個技能作為主要技能
-            sk_list = skills_by_monster.get(mi.monster_id, [])
-            counter_max = sk_list[0].counter_max if sk_list else 0
-
-            st = MonsterState(
-                monster_id=mi.monster_id,
-                hp=float(base.health),
-                shield=0.0,
-                counter=int(counter_max),
-                counter_max=int(counter_max),
-                has_acted_this_turn=False,
-            )
-            monsters.append((mi, base, st))
-
-        if not party_cards:
-            raise ValueError("❌ No cards for party.")
-
-        # --------------------------
-        # Deck runtime state
-        # --------------------------
-        draw_pile: List[Card] = list(party_cards)
-        discard_pile: List[Card] = []
-        hand: List[Card] = []
-        self._rng.shuffle(draw_pile)
-
-        # --------------------------
-        # Init logs
-        # --------------------------
-        self._print_and_record_system(
-            battle_index, 0, "System", "BattleStart", f"=== Battle {battle_index} Start ==="
-        )
-        self._print_and_record_system(
-            battle_index,
-            0,
-            "System",
-            "Init",
-            f"[Init] PartyHP={party_runtime.team_hp:.1f}/{party_runtime.team_hp_max:.1f} "
-            f"Shield={party_runtime.team_shield:.1f} Active={active_member.character_id}",
-        )
-        self._print_and_record_system(
-            battle_index,
-            0,
-            "System",
-            "InitEnemies",
-            "[Init] Enemies="
-            + ", ".join([f"{mi.monster_id}(HP={st.hp:.1f},C={st.counter})" for mi, _, st in monsters]),
-        )
-
-        # --------------------------
-        # Ability: BattleStart (one-time per battle)
-        # --------------------------
-        if ability_system is not None:
-            enemy_count = sum(1 for _, _, st in monsters if st.hp > 0)
-
-            ctx_battle_start: Dict[str, Any] = {
-                "party": party_runtime,
-                "active_member": active_member,
-                "monsters": monsters,
-                "enemy_count": enemy_count,
-
-                # Condition inputs
-                "partner_id": ability_context.get("partner_id"),
-                "owner_class": ability_context.get("owner_class"),
-                "partner_class": ability_context.get("partner_class"),
-                "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
-
-                # Engine runtime state target
-                "runtime_mod": {},  # BattleStart usually writes extra_ctx / runtime_mod defaults
-            }
-
-            try:
-                ability_system.on_trigger(
-                    TriggerEvent.BattleStart,
-                    ctx=ctx_battle_start,
-                    ability_context=ability_context,
-                )
-            except Exception as e:
-                self._print_and_record_system(
-                    battle_index,
-                    0,
-                    "System",
-                    "AbilityError",
-                    f"[AbilityError] (BattleStart) {type(e).__name__}: {e}",
-                )
-
-            # Debug: show points if exists
-            if "arwen_points" in ability_context["extra_ctx"]:
-                self._print_and_record_system(
-                    battle_index,
-                    0,
-                    "System",
-                    "ArwenInit",
-                    f"[Arwen] Init points={ability_context['extra_ctx'].get('arwen_points')}",
-                )
-
-        def draw_cards(turn: int, n: int) -> None:
-            """Draw up to n cards into hand. If draw pile insufficient, shuffle discard into draw."""
-            nonlocal draw_pile, discard_pile, hand
-            for _ in range(n):
-                if not draw_pile:
-                    if discard_pile:
-                        draw_pile = discard_pile
-                        discard_pile = []
-                        self._rng.shuffle(draw_pile)
-                        self._print_and_record_system(
-                            battle_index,
-                            turn,
-                            "System",
-                            "Shuffle",
-                            f"[Shuffle] Discard -> Draw (count={len(draw_pile)})",
-                        )
-                    else:
-                        break
-                hand.append(draw_pile.pop())
-
-        # --------------------------
-        # Main loop
-        # --------------------------
-        turn = 0
-        while True:
-            turn += 1
-            if turn > self.config.max_turns:
-                return BattleResult(
-                    battle_index=battle_index,
-                    winner="Enemy" if party_runtime.team_hp <= 0 else "Player",
-                    turns=turn - 1,
-                    player_hp_end=float(party_runtime.team_hp),
-                    enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
-                )
-
-            # Reset per-turn flags
-            for _, _, st in monsters:
-                st.has_acted_this_turn = False
-
-            # =========================
-            # Player Phase
-            # =========================
-            ap = int(self.config.ap_max)
-
-            # 回合開始抽手牌
-            hand.clear()
-            draw_cards(turn, int(self.config.hand_size))
-
-            self._print_and_record_system(
-                battle_index,
-                turn,
-                "System",
-                "TurnStart",
-                f"--- Turn {turn} Start --- (AP={ap}, Hand={len(hand)}, Draw={len(draw_pile)}, Discard={len(discard_pile)})",
-            )
-
-            # -------------------------------------------------
-            # Ability runtime modifiers (per-turn)
-            # -------------------------------------------------
-            runtime_mod: Dict[str, Any] = {
-                "player_damage_multiplier": 1.0,
-                "healing_multiplier": 1.0,
-            }
-
-            # Douglas: 每場戰鬥只在第一回合觸發 -> FirstTurnStart
-            if turn == 1 and ability_system is not None:
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    "System",
-                    "AbilityBefore",
-                    f"[Ability] Before trigger: "
-                    f"player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
-                    f"healing_multiplier={runtime_mod.get('healing_multiplier', 1.0)}",
-                )
-
-                ctx_turn1: Dict[str, Any] = {
-                    "party": party_runtime,
-                    "active_member": active_member,
-                    "monsters": monsters,
-
-                    # Condition inputs
-                    "partner_id": ability_context.get("partner_id"),
-                    "owner_class": ability_context.get("owner_class"),
-                    "partner_class": ability_context.get("partner_class"),
-                    "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
-
-                    # Engine runtime target
-                    "runtime_mod": runtime_mod,
-                }
-
-                try:
-                    ability_system.on_trigger(
-                        TriggerEvent.FirstTurnStart,
-                        ctx=ctx_turn1,
-                        ability_context=ability_context,
-                    )
-                except Exception as e:
-                    self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        "System",
-                        "AbilityError",
-                        f"[AbilityError] (FirstTurnStart) {type(e).__name__}: {e}",
-                    )
-
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    "System",
-                    "AbilityAfter",
-                    f"[Ability] After trigger: "
-                    f"player_damage_multiplier={runtime_mod.get('player_damage_multiplier', 1.0)} "
-                    f"healing_multiplier={runtime_mod.get('healing_multiplier', 1.0)} "
-                    f"(extra_ctx_keys={list(ability_context.get('extra_ctx', {}).keys())})",
-                )
-
-            # 玩家出牌迴圈：先看 AP -> 篩可出 -> 隨機挑 1 張出
-            while ap > 0:
-                playable = [c for c in hand if int(getattr(c, "ap_cost", 1)) <= ap]
-                if not playable:
-                    self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        "System",
-                        "NoPlayableCard",
-                        f"[PlayerPhase] No playable card (AP={ap}, Hand={len(hand)}) -> End Player Phase",
-                    )
-                    break
-
-                card = self._rng.choice(playable)
-                cost = int(getattr(card, "ap_cost", 1))
-
-                # 扣 AP，從手牌移除，丟棄牌堆
-                ap -= cost
-                hand.remove(card)
-                discard_pile.append(card)
-
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    active_member.character_id,
-                    "PlayCard",
-                    f"[PlayCard] {active_member.character_id} plays {card.card_id} (Cost={cost}, APLeft={ap})",
-                )
-
-                effects = card_effects_by_id.get(card.card_id, [])
-                for ef in effects:
-                    self._apply_card_effect(
-                        battle_index=battle_index,
-                        turn=turn,
-                        party=party_runtime,
-                        active_member_id=active_member.character_id,
-                        effect=ef,
-                        monsters=monsters,
-                        runtime_mod=runtime_mod,
-                    )
-
-                # 玩家出任意卡牌 -> tick counters
-                self._tick_counters_on_player_play_card(
-                    battle_index=battle_index,
-                    turn=turn,
-                    party=party_runtime,
-                    monsters=monsters,
-                    skills_by_monster=skills_by_monster,
-                    ability_system=ability_system,
-                    ability_context=ability_context,
-                )
-
-                # Battle end check
-                winner = self._get_winner(party_runtime, monsters)
-                if winner is not None:
-                    return BattleResult(
-                        battle_index=battle_index,
-                        winner=winner,
-                        turns=turn,
-                        player_hp_end=float(party_runtime.team_hp),
-                        enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
-                    )
-
-            # 回合結束：手牌剩餘全部丟棄牌堆
-            if hand:
-                discard_pile.extend(hand)
-                hand.clear()
-
-            # =========================
-            # Enemy Phase
-            # =========================
-            for (mi, base, st) in monsters:
-                if st.hp <= 0:
-                    continue
-
-                sk_list = skills_by_monster.get(mi.monster_id, [])
-                if not sk_list:
-                    continue
-                sk = sk_list[0]
-
-                # 若設定為 ActIfNotActedThisTurn，且本回合尚未行動，且 counter > 0，則在敵方階段行動一次
-                if sk.enemy_phase_action_rule == EnemyPhaseActionRule.ActIfNotActedThisTurn:
-                    if (not st.has_acted_this_turn) and (st.counter > 0):
-                        self._monster_act(
-                            battle_index=battle_index,
-                            turn=turn,
-                            party=party_runtime,
-                            monster_index=mi,
-                            monster_base=base,
-                            monster_state=st,
-                            skills_by_monster=skills_by_monster,
-                            reason="EnemyPhase",
-                            ability_system=ability_system,
-                            ability_context=ability_context,
-                        )
-
-                        winner = self._get_winner(party_runtime, monsters)
-                        if winner is not None:
-                            return BattleResult(
-                                battle_index=battle_index,
-                                winner=winner,
-                                turns=turn,
-                                player_hp_end=float(party_runtime.team_hp),
-                                enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
-                            )
-
-            # =========================
-            # End of Turn: Reload (AfterEnemyAttackPhase)
-            # =========================
-            for (mi, _, st) in monsters:
-                if st.hp <= 0:
-                    continue
-                if not st.has_acted_this_turn:
-                    continue
-
-                sk_list = skills_by_monster.get(mi.monster_id, [])
-                if not sk_list:
-                    continue
-                sk = sk_list[0]
-
-                if sk.reload_timing == ReloadTiming.AfterEnemyAttackPhase:
-                    st.counter = int(st.counter_max)
-                    self._print_and_record_system(
-                        battle_index, turn, mi.monster_id, "Reload", f"[Reload] counter reset to {st.counter}"
-                    )
-
-            winner = self._get_winner(party_runtime, monsters)
-            if winner is not None:
-                return BattleResult(
-                    battle_index=battle_index,
-                    winner=winner,
-                    turns=turn,
-                    player_hp_end=float(party_runtime.team_hp),
-                    enemies_alive=int(sum(1 for _, _, st in monsters if st.hp > 0)),
-                )
-
-    # =========================================================
-    # Internal - Effects
-    # =========================================================
-
-    def _apply_card_effect(
-        self,
-        battle_index: int,
-        turn: int,
-        party: PlayerPartySnapshot,
-        active_member_id: str,
-        effect: CardEffect,
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-        runtime_mod: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        # Value = base(stat)*multiplier + flat_value
-        if effect.scale_stat == ScaleStat.ATK:
-            base_value = party.get_active_member().final_atk
-        elif effect.scale_stat == ScaleStat.DEF:
-            base_value = party.get_active_member().final_def
-        elif effect.scale_stat == ScaleStat.HP:
-            # 隊伍共用血條：HP scale 用 team_hp_max
-            base_value = party.team_hp_max
-        else:
-            base_value = 0.0
-
-        value = float(base_value) * float(effect.multiplier) + float(effect.flat_value)
-
-        # Ability runtime modifier: outgoing damage multiplier
-        if effect.effect_type == EffectType.Damage and runtime_mod is not None:
-            mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
-            if mul != 1.0:
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    "System",
-                    "AbilityMul",
-                    f"[Ability] Apply player_damage_multiplier={mul} to damage value",
-                )
-            value *= mul
-
-        # Ability runtime modifier: healing multiplier
-        if effect.effect_type == EffectType.Heal and runtime_mod is not None:
-            hmul = float(runtime_mod.get("healing_multiplier", 1.0))
-            if hmul != 1.0:
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    "System",
-                    "AbilityHealMul",
-                    f"[Ability] Apply healing_multiplier={hmul} to heal value",
-                )
-            value *= hmul
-
-        if effect.effect_type == EffectType.Damage:
-            if effect.target == TargetType.EnemyAll:
-                for (mi, _, st) in monsters:
-                    if st.hp <= 0:
-                        continue
-                    old_hp, old_sh = st.hp, st.shield
-                    st.hp, st.shield = apply_damage(st.hp, st.shield, value)
-                    self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        "Player",
-                        "Damage",
-                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} "
-                        f"Shield {old_sh:.1f}->{st.shield:.1f}",
-                    )
-            elif effect.target == TargetType.EnemySingle:
-                picked = pick_enemy_single(monsters)
-                if picked is not None:
-                    mi, _, st = picked
-                    old_hp, old_sh = st.hp, st.shield
-                    st.hp, st.shield = apply_damage(st.hp, st.shield, value)
-                    self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        "Player",
-                        "Damage",
-                        f"[Damage] Player -> {mi.monster_id} Dmg={value:.1f} | HP {old_hp:.1f}->{st.hp:.1f} "
-                        f"Shield {old_sh:.1f}->{st.shield:.1f}",
-                    )
-
-        elif effect.effect_type == EffectType.Shield:
-            old = party.team_shield
-            party.team_shield = max(0.0, party.team_shield + value)
-            self._print_and_record_system(
-                battle_index,
-                turn,
-                "Player",
-                "Shield",
-                f"[Shield] +{value:.1f} (Shield {old:.1f} -> {party.team_shield:.1f})",
-            )
-
-        elif effect.effect_type == EffectType.Heal:
-            old = party.team_hp
-            party.team_hp = clamp(party.team_hp + value, 0.0, party.team_hp_max)
-            self._print_and_record_system(
-                battle_index,
-                turn,
-                "Player",
-                "Heal",
-                f"[Heal] +{value:.1f} (HP {old:.1f} -> {party.team_hp:.1f})",
-            )
-
-    # =========================================================
-    # Internal - Counter / Monster act
-    # =========================================================
-
-    def _tick_counters_on_player_play_card(
-        self,
-        battle_index: int,
-        turn: int,
-        party: PlayerPartySnapshot,
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-        skills_by_monster: Dict[str, List[MonsterSkill]],
-        ability_system: Optional[Any],
-        ability_context: Dict[str, Any],
-    ) -> None:
-        for (mi, base, st) in monsters:
-            if st.hp <= 0:
-                continue
-
-            sk_list = skills_by_monster.get(mi.monster_id, [])
-            if not sk_list:
-                continue
-            sk = sk_list[0]
-
-            if sk.counter_mode != CounterMode.Enabled:
-                continue
-            if sk.counter_start_trigger != CounterStartTrigger.OnPlayerPlayCard:
-                continue
-
-            before = st.counter
-            st.counter = max(0, int(st.counter) - 1)
-            self._print_and_record_system(
-                battle_index, turn, mi.monster_id, "CounterTick", f"[Counter] {before} -> {st.counter}"
-            )
-
-            # Reaction: counter==0 and not acted => act immediately
-            if st.counter == 0 and (not st.has_acted_this_turn):
-                self._monster_act(
-                    battle_index=battle_index,
-                    turn=turn,
-                    party=party,
-                    monster_index=mi,
-                    monster_base=base,
-                    monster_state=st,
-                    skills_by_monster=skills_by_monster,
-                    reason="PlayerPhaseReaction",
-                    ability_system=ability_system,
-                    ability_context=ability_context,
-                )
-
-    def _monster_act(
-        self,
-        battle_index: int,
-        turn: int,
-        party: PlayerPartySnapshot,
-        monster_index: MonsterIndex,
-        monster_base: MonsterBaseStat,
-        monster_state: MonsterState,
-        skills_by_monster: Dict[str, List[MonsterSkill]],
-        reason: str,
-        ability_system: Optional[Any],
-        ability_context: Dict[str, Any],
-    ) -> None:
-        if monster_state.hp <= 0:
-            return
-
-        sk_list = skills_by_monster.get(monster_index.monster_id, [])
-        if not sk_list:
-            return
-
-        # MVP: 只用第一個技能
-        sk = sk_list[0]
-        monster_state.has_acted_this_turn = True
-
-        if sk.skill_type == MonsterSkillType.Attack:
-            base_dmg = float(sk.value)
-
-            # Ability: OnEnemyAttack (per attack)
-            incoming_mod: Dict[str, Any] = {"incoming_damage_multiplier": 1.0}
-            if ability_system is not None:
-                ctx_hit: Dict[str, Any] = {
-                    "party": party,
-                    "active_member": party.get_active_member(),
-                    "monsters": [],
-
-                    # Condition inputs
-                    "partner_id": ability_context.get("partner_id"),
-                    "owner_class": ability_context.get("owner_class"),
-                    "partner_class": ability_context.get("partner_class"),
-                    "partner_stack_count": int(ability_context.get("partner_stack_count", 0)),
-
-                    # Runtime target for this attack
-                    "runtime_mod": incoming_mod,
-
-                    # Optional hit info (future-proof)
-                    "attacker_monster_id": monster_index.monster_id,
-                    "incoming_damage_base": base_dmg,
-                }
-                try:
-                    ability_system.on_trigger(
-                        TriggerEvent.OnEnemyAttack,
-                        ctx=ctx_hit,
-                        ability_context=ability_context,
-                    )
-                except Exception as e:
-                    self._print_and_record_system(
-                        battle_index,
-                        turn,
-                        "System",
-                        "AbilityError",
-                        f"[AbilityError] (OnEnemyAttack) {type(e).__name__}: {e}",
-                    )
-
-            mul = float(incoming_mod.get("incoming_damage_multiplier", 1.0))
-            dmg = base_dmg * mul
-
-            # Debug Arwen points after consume
-            if "arwen_points" in ability_context.get("extra_ctx", {}):
-                self._print_and_record_system(
-                    battle_index,
-                    turn,
-                    "System",
-                    "ArwenPoint",
-                    f"[Arwen] After OnEnemyAttack: points={ability_context['extra_ctx'].get('arwen_points')} "
-                    f"(mul={mul})",
-                )
-
-            old_hp, old_sh = party.team_hp, party.team_shield
-            party.team_hp, party.team_shield = apply_damage(party.team_hp, party.team_shield, dmg)
-            self._print_and_record_system(
-                battle_index,
-                turn,
-                monster_index.monster_id,
-                "EnemyAttack",
-                f"[Damage] ({reason}) {monster_index.monster_id} -> Party "
-                f"Dmg={dmg:.1f} (Base={base_dmg:.1f}, Mul={mul:.2f}) | "
-                f"HP {old_hp:.1f}->{party.team_hp:.1f} Shield {old_sh:.1f}->{party.team_shield:.1f}",
-            )
-
-        elif sk.skill_type == MonsterSkillType.AddShield:
-            old = monster_state.shield
-            monster_state.shield = max(0.0, monster_state.shield + float(sk.value))
-            self._print_and_record_system(
-                battle_index,
-                turn,
-                monster_index.monster_id,
-                "EnemyShield",
-                f"[EnemyShield] ({reason}) +{float(sk.value):.1f} (Shield {old:.1f} -> {monster_state.shield:.1f})",
-            )
-
-    # =========================================================
-    # Internal - End check
-    # =========================================================
-
-    def _get_winner(
-        self,
-        party: PlayerPartySnapshot,
-        monsters: List[Tuple[MonsterIndex, MonsterBaseStat, MonsterState]],
-    ) -> Optional[str]:
-        if party.team_hp <= 0:
-            return "Enemy"
-        if all(st.hp <= 0 for _, _, st in monsters):
-            return "Player"
-        return None
-
-    # =========================================================
-    # Reporter helpers (use BattleReporter.add_event)
-    # =========================================================
-
-    def _print_and_record_system(
+        self.log_level = log_level
+
+    # ----------------------------
+    # Internal logging helper
+    # ----------------------------
+    def _event(
         self,
         battle_index: int,
         turn: int,
         actor: str,
         event_type: str,
         message: str,
+        **extra: Any,
     ) -> None:
-        self.log.info(message)
-        payload: Dict[str, Any] = {
-            "battle_index": battle_index,
-            "turn": turn,
-            "actor": actor,
-            "event_type": event_type,
-            "message": message,
+        if self.reporter:
+            payload = {
+                "battle_index": battle_index,
+                "turn": turn,
+                "actor": actor,
+                "event_type": event_type,
+                "message": message,
+            }
+            payload.update(extra)
+            self.reporter.add_event(payload)
+
+        if self.log_level in (LogLevel.DEBUG, LogLevel.TRACE):
+            print(f"[B{battle_index} T{turn}] {actor} {event_type}: {message}")
+
+    # ----------------------------
+    # Ability trigger wrapper
+    # ----------------------------
+    def _trigger_ability(
+        self,
+        battle_index: int,
+        turn: int,
+        trigger: TriggerEvent,
+        extra_ctx: Dict[str, Any],
+        runtime_mod: Dict[str, Any],
+        source_desc: str,
+    ) -> None:
+        if not self.ability_system:
+            return
+
+        # reporter patterns want these lines
+        dmg_mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
+        heal_mul = float(runtime_mod.get("healing_multiplier", 1.0))
+        self._event(
+            battle_index,
+            turn,
+            "Ability",
+            "BeforeTrigger",
+            f"[Ability] Before trigger: player_damage_multiplier={dmg_mul} healing_multiplier={heal_mul}",
+        )
+
+        self.ability_system.trigger(
+            trigger_event=trigger,
+            extra_ctx=extra_ctx,
+            runtime_mod=runtime_mod,
+        )
+
+        dmg_mul2 = float(runtime_mod.get("player_damage_multiplier", 1.0))
+        heal_mul2 = float(runtime_mod.get("healing_multiplier", 1.0))
+        self._event(
+            battle_index,
+            turn,
+            "Ability",
+            "AfterTrigger",
+            f"[Ability] After trigger: player_damage_multiplier={dmg_mul2} healing_multiplier={heal_mul2} (triggered by {source_desc})",
+            extra_ctx_keys=list(extra_ctx.keys()),
+        )
+
+    # ----------------------------
+    # Battle entry
+    # ----------------------------
+    def run_battles(
+        self,
+        *,
+        config: BattleConfig,
+        party: PlayerPartySnapshot,
+        party_cards: List[Card],
+        effects_by_card_id: Dict[str, List[CardEffect]],
+        monster_indexes: List[MonsterIndex],
+        monster_base_stats: Dict[str, MonsterBaseStat],
+        monster_skills: List[MonsterSkill],
+        # injected context from main/runtime_input (for ability condition)
+        ability_extra_ctx: Optional[Dict[str, Any]] = None,
+    ) -> List[BattleResult]:
+        random.seed(config.seed)
+        results: List[BattleResult] = []
+
+        for bi in range(config.battle_count):
+            r = self._run_one_battle(
+                battle_index=bi,
+                cfg=config,
+                party=party,
+                party_cards=party_cards,
+                effects_by_card_id=effects_by_card_id,
+                monster_indexes=monster_indexes,
+                monster_base_stats=monster_base_stats,
+                monster_skills=monster_skills,
+                ability_extra_ctx=ability_extra_ctx or {},
+            )
+            results.append(r)
+
+        return results
+
+    def _run_one_battle(
+        self,
+        *,
+        battle_index: int,
+        cfg: BattleConfig,
+        party: PlayerPartySnapshot,
+        party_cards: List[Card],
+        effects_by_card_id: Dict[str, List[CardEffect]],
+        monster_indexes: List[MonsterIndex],
+        monster_base_stats: Dict[str, MonsterBaseStat],
+        monster_skills: List[MonsterSkill],
+        ability_extra_ctx: Dict[str, Any],
+    ) -> BattleResult:
+        # clone party hp (MVP: shared HP bar)
+        team_hp_max = float(party.team_hp_max)
+        team_hp_now = float(party.team_hp_now)
+
+        # choose monsters by weight (MVP: pick 1~3)
+        # 你 Arwen 的點數會依「敵人數量」決定，所以這裡保持多敵人情境
+        enemy_count = min(3, max(1, len(monster_indexes)))
+        pool: List[str] = []
+        for m in monster_indexes:
+            pool += [m.monster_id] * max(1, int(m.monster_weight))
+        chosen_ids = [random.choice(pool) for _ in range(enemy_count)]
+
+        enemies: List[MonsterState] = []
+        for mid in chosen_ids:
+            bs = monster_base_stats[mid]
+            enemies.append(MonsterState(monster_id=mid, hp_now=float(bs.health)))
+
+        # build skill map
+        skills_by_monster: Dict[str, List[MonsterSkill]] = {}
+        for s in monster_skills:
+            skills_by_monster.setdefault(s.monster_id, []).append(s)
+
+        # ability contexts
+        extra_ctx: Dict[str, Any] = dict(ability_extra_ctx)  # persistent
+        runtime_mod: Dict[str, Any] = {
+            "player_damage_multiplier": 1.0,
+            "healing_multiplier": 1.0,
+            "incoming_damage_multiplier": 1.0,  # for Arwen consume-point mitigation
         }
-        self.reporter.add_event(payload)
+
+        # ---------- BattleStart trigger ----------
+        # Arwen: init points based on enemy count (max 3) — 你之前也確認是「開戰一次」
+        extra_ctx.setdefault("enemy_count", enemy_count)
+        extra_ctx.setdefault("arwen_points", min(3, int(enemy_count)))
+        self._event(battle_index, 0, "Arwen", "Init", f"[Arwen] Init points={extra_ctx['arwen_points']}")
+
+        self._trigger_ability(
+            battle_index=battle_index,
+            turn=0,
+            trigger=TriggerEvent.BattleStart,
+            extra_ctx=extra_ctx,
+            runtime_mod=runtime_mod,
+            source_desc="BattleStart",
+        )
+
+        # ---------- Turns loop ----------
+        turn = 0
+        while turn < cfg.max_turns:
+            turn += 1
+
+            # reset per-turn flags
+            for e in enemies:
+                e.acted_this_turn = False
+
+            # ========== Player Phase ==========
+            if not party_cards:
+                # no cards => skip
+                self._event(battle_index, turn, "Player", "NoCard", "No card to play.")
+            else:
+                card = random.choice(party_cards)
+                effects = effects_by_card_id.get(card.card_id, [])
+
+                # trigger ability on play card
+                self._trigger_ability(
+                    battle_index=battle_index,
+                    turn=turn,
+                    trigger=TriggerEvent.OnPlayCard,
+                    extra_ctx=extra_ctx,
+                    runtime_mod=runtime_mod,
+                    source_desc=f"OnPlayCard card={card.card_id}",
+                )
+
+                # apply effects
+                for eff in effects:
+                    # compute base using first member as active (MVP)
+                    active = party.members[0]
+                    base = 0.0
+                    if eff.scale_stat.value == "ATK":
+                        base = float(active.final_atk)
+                    elif eff.scale_stat.value == "DEF":
+                        base = float(active.final_def)
+                    elif eff.scale_stat.value == "HP":
+                        base = float(team_hp_max)
+
+                    value = base * float(eff.multiplier) + float(eff.flat_value)
+
+                    if eff.effect_type == EffectType.Damage:
+                        # Douglas-like outgoing multiplier
+                        dmg_mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
+                        self._event(
+                            battle_index,
+                            turn,
+                            "Ability",
+                            "Apply",
+                            f"[Ability] Apply player_damage_multiplier={dmg_mul} to damage value",
+                        )
+                        value = value * dmg_mul
+
+                        # target first alive enemy
+                        tgt = next((x for x in enemies if not x.is_dead()), None)
+                        if tgt is None:
+                            break
+                        tgt.hp_now -= float(value)
+                        self._event(
+                            battle_index,
+                            turn,
+                            "Player",
+                            "Damage",
+                            f"PlayCard {card.card_id} deal {value:.2f} to {tgt.monster_id} (hp={tgt.hp_now:.2f})",
+                        )
+
+                    elif eff.effect_type == EffectType.Heal:
+                        heal_mul = float(runtime_mod.get("healing_multiplier", 1.0))
+                        self._event(
+                            battle_index,
+                            turn,
+                            "Ability",
+                            "Apply",
+                            f"[Ability] Apply healing_multiplier={heal_mul} to heal value",
+                        )
+                        value = value * heal_mul
+                        team_hp_now = min(team_hp_max, team_hp_now + float(value))
+                        self._event(
+                            battle_index,
+                            turn,
+                            "Player",
+                            "Heal",
+                            f"PlayCard {card.card_id} heal {value:.2f} (team_hp={team_hp_now:.2f}/{team_hp_max:.2f})",
+                        )
+
+                    elif eff.effect_type == EffectType.Shield:
+                        # MVP ignore shield (or keep for later)
+                        self._event(battle_index, turn, "Player", "Shield", f"Shield effect {value:.2f} (ignored in MVP)")
+
+            # check win after player phase
+            if all(e.is_dead() for e in enemies):
+                return BattleResult(
+                    battle_index=battle_index,
+                    winner="Player",
+                    turns=turn,
+                    player_hp_end=float(team_hp_now),
+                    enemies_alive=0,
+                    extra={"enemy_count": enemy_count},
+                )
+
+            # ========== Enemy Phase ==========
+            for e in enemies:
+                if e.is_dead():
+                    continue
+
+                bs = monster_base_stats[e.monster_id]
+                # find a simple attack skill (MVP)
+                s_list = skills_by_monster.get(e.monster_id, [])
+                attack_skill = next((s for s in s_list if s.skill_type == MonsterSkillType.Attack), None)
+                damage = float(attack_skill.value if attack_skill else bs.attack)
+
+                # Arwen: consume point on being attacked -> set incoming_damage_multiplier
+                # NOTE: ability_system has TriggerEvent.OnEnemyAttack for data-driven version
+                # Here we also keep a simple fallback:
+                self._trigger_ability(
+                    battle_index=battle_index,
+                    turn=turn,
+                    trigger=TriggerEvent.OnEnemyAttack,
+                    extra_ctx=extra_ctx,
+                    runtime_mod=runtime_mod,
+                    source_desc=f"OnEnemyAttack monster={e.monster_id}",
+                )
+
+                inc_mul = float(runtime_mod.get("incoming_damage_multiplier", 1.0))
+                if inc_mul < 0.9999:
+                    # reporter wants this pattern
+                    self._event(
+                        battle_index,
+                        turn,
+                        "Arwen",
+                        "OnEnemyAttack",
+                        f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
+                    )
+
+                team_hp_now -= damage * inc_mul
+                self._event(
+                    battle_index,
+                    turn,
+                    "Enemy",
+                    "Attack",
+                    f"{e.monster_id} attack {damage:.2f} * {inc_mul:.2f} => team_hp={team_hp_now:.2f}/{team_hp_max:.2f}",
+                )
+
+                # reset incoming mul to 1 each hit (so next hit re-evaluates)
+                runtime_mod["incoming_damage_multiplier"] = 1.0
+
+                if team_hp_now <= 0:
+                    alive = sum(1 for x in enemies if not x.is_dead())
+                    return BattleResult(
+                        battle_index=battle_index,
+                        winner="Enemy",
+                        turns=turn,
+                        player_hp_end=0.0,
+                        enemies_alive=alive,
+                        extra={"enemy_count": enemy_count},
+                    )
+
+        # max turns reached
+        alive = sum(1 for x in enemies if not x.is_dead())
+        return BattleResult(
+            battle_index=battle_index,
+            winner="Timeout",
+            turns=cfg.max_turns,
+            player_hp_end=max(0.0, float(team_hp_now)),
+            enemies_alive=alive,
+            extra={"enemy_count": enemy_count},
+        )
