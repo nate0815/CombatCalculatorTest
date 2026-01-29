@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
 from typing import Any, Dict, List, Optional
 
 
@@ -21,7 +20,6 @@ class TargetType(str, Enum):
     """
     技能或卡牌的目標類型
     """
-    # Card side (you already use these)
     EnemySingle = "EnemySingle"  # 敵方單體
     EnemyAll = "EnemyAll"        # 敵方全體
     Self = "Self"                # 自身
@@ -36,22 +34,21 @@ class EffectType(str, Enum):
     """
     卡牌效果類型
     """
-    Damage = "Damage"  # 傷害
-    Shield = "Shield"  # 護盾
-    Heal = "Heal"      # 治療
-    Buff = "Buff"      # 增益 (未實作)
-    Debuff = "Debuff"  # 減益 (未實作)
+    Damage = "Damage"
+    Shield = "Shield"
+    Heal = "Heal"
+    Buff = "Buff"
+    Debuff = "Debuff"
 
 
 class ScaleStat(str, Enum):
     """
     數值加成的參照屬性
-    (例如：造成攻擊力 100% 的傷害)
     """
-    ATK = "ATK"       # 攻擊力
-    DEF = "DEF"       # 防禦力
-    HP = "HP"         # 血量
-    None_ = "None"    # 無 (使用 None_ 避免與 Python 關鍵字衝突)
+    ATK = "ATK"
+    DEF = "DEF"
+    HP = "HP"
+    None_ = "None"
 
 
 class CardLifecycle(str, Enum):
@@ -74,14 +71,14 @@ class OnEndTurnAction(str, Enum):
 # ---- Monster skill system (MVP) ----
 
 class MonsterSkillType(str, Enum):
-    Attack = "Attack"       # 攻擊
-    AddShield = "AddShield" # 增加護盾
-    Buff = "Buff"           # 增益
-    Debuff = "Debuff"       # 減益
+    Attack = "Attack"
+    AddShield = "AddShield"
+    Buff = "Buff"
+    Debuff = "Debuff"
 
 
 class ReloadTiming(str, Enum):
-    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"  # 敵方攻擊階段結束後重置計數器 (MVP 預設)
+    AfterEnemyAttackPhase = "AfterEnemyAttackPhase"
 
 
 class CounterMode(str, Enum):
@@ -91,7 +88,7 @@ class CounterMode(str, Enum):
 
 
 class CounterStartTrigger(str, Enum):
-    OnPlayerPlayCard = "OnPlayerPlayCard"  # 當玩家打出任意卡牌時觸發
+    OnPlayerPlayCard = "OnPlayerPlayCard"
     OnPlayerAttackCard = "OnPlayerAttackCard"
     OnPlayerTurnStart = "OnPlayerTurnStart"
 
@@ -104,6 +101,7 @@ class EnemyPhaseActionRule(str, Enum):
 
 # =========================================================
 # Ability / Condition / Effect System (MVP)
+# (留著給 ability_system 用；battle_simulator 的 TriggerEvent 來自 ability_models.py)
 # =========================================================
 
 class TriggerEvent(str, Enum):
@@ -217,7 +215,7 @@ class PartyRuntimeState:
 
 
 # =========================================================
-# Phase 1 Output (Character Snapshot)
+# Phase 1 Output
 # =========================================================
 
 @dataclass
@@ -226,7 +224,6 @@ class CharacterSnapshot:
     final_atk: float
     final_def: float
     final_hp: float
-
     level: Optional[float] = None
     affection_level: Optional[int] = None
 
@@ -238,20 +235,14 @@ class CharacterSnapshot:
 @dataclass
 class PlayerPartySnapshot:
     """
-    玩家隊伍快照 (MVP: 共用血條)
-
-    你目前的 battle_simulator.py 會用到:
+    battle_simulator 會使用：
+    - team_hp_max
     - team_hp_now
-    - team_hp_max / team_hp_max_now
-    - team_shield_now (很可能下一步也會用)
-    - active_character_id / active_member
-
-    所以這裡提供相容層，避免每次改名就爆炸。
+    - members
     """
     members: List[CharacterSnapshot]
     active_character_id: str = ""
 
-    # 新版命名
     team_hp_max: float = 0.0
     team_hp: float = 0.0
     team_shield: float = 0.0
@@ -263,26 +254,14 @@ class PlayerPartySnapshot:
         self.team_hp_max = float(sum(m.final_hp for m in self.members))
         self.team_hp = float(self.team_hp_max)
 
-        # active id fallback
         if (not self.active_character_id) or (not any(m.character_id == self.active_character_id for m in self.members)):
             self.active_character_id = self.members[0].character_id
 
-    # ---- helpers ----
-    @property
-    def members_by_id(self) -> Dict[str, CharacterSnapshot]:
-        return {m.character_id: m for m in self.members}
-
     def get_active_member(self) -> CharacterSnapshot:
-        return self.members_by_id.get(self.active_character_id, self.members[0])
-
-    @property
-    def active_member(self) -> CharacterSnapshot:
-        # 일부舊版 simulator 可能用 party.active_member
-        return self.get_active_member()
-
-    # ----------------------------
-    # Backward-compatible aliases
-    # ----------------------------
+        for m in self.members:
+            if m.character_id == self.active_character_id:
+                return m
+        return self.members[0]
 
     @property
     def team_hp_now(self) -> float:
@@ -291,14 +270,6 @@ class PlayerPartySnapshot:
     @team_hp_now.setter
     def team_hp_now(self, v: float) -> None:
         self.team_hp = float(v)
-
-    @property
-    def team_hp_max_now(self) -> float:
-        return float(self.team_hp_max)
-
-    @team_hp_max_now.setter
-    def team_hp_max_now(self, v: float) -> None:
-        self.team_hp_max = float(v)
 
     @property
     def team_shield_now(self) -> float:
@@ -310,7 +281,7 @@ class PlayerPartySnapshot:
 
 
 # =========================================================
-# Card Data (MVP)
+# Card Data
 # =========================================================
 
 @dataclass
@@ -343,7 +314,7 @@ class CardEffect:
 
 
 # =========================================================
-# Monster Data (MVP)
+# Monster Data
 # =========================================================
 
 @dataclass
@@ -378,112 +349,63 @@ class MonsterSkill:
 
 
 # =========================================================
-# Runtime State (MVP)
+# Runtime State (battle_simulator 依賴這裡的命名)
 # =========================================================
 
-from typing import Any, Dict, List, Optional  # 確保有 Any
-
-@dataclass(init=False)
+@dataclass
 class MonsterState:
     """
-    怪物戰鬥時的動態狀態 (HP, 護盾, 計數器等)
-
-    同時支援：
-    - MonsterState(hp=..., shield=...)
-    - MonsterState(hp_now=..., shield_now=...)
-    並提供 battle_simulator 需要的 is_dead()
+    battle_simulator 會用：
+    - hp_now
+    - acted_this_turn
+    - is_dead()
     """
     monster_id: str
-    hp: float
-    shield: float
-    counter: int
-    counter_max: int
-    has_acted_this_turn: bool
+    hp_now: float
+    shield: float = 0.0
 
-    def __init__(
-        self,
-        monster_id: str,
-        hp: Optional[float] = None,
-        shield: float = 0.0,
-        counter: int = 0,
-        counter_max: int = 0,
-        has_acted_this_turn: bool = False,
-        # legacy names
-        hp_now: Optional[float] = None,
-        shield_now: Optional[float] = None
-    ) -> None:
-        if hp is None and hp_now is None:
-            raise TypeError("MonsterState requires hp or hp_now")
+    counter: int = 0
+    counter_max: int = 0
 
-        if shield_now is not None:
-            shield = float(shield_now)
-
-        self.monster_id = monster_id
-        self.hp = float(hp if hp is not None else hp_now)
-        self.shield = float(shield)
-        self.counter = int(counter)
-        self.counter_max = int(counter_max)
-        self.has_acted_this_turn = bool(has_acted_this_turn)
-
-    @property
-    def hp_now(self) -> float:
-        return float(self.hp)
-
-    @hp_now.setter
-    def hp_now(self, v: float) -> None:
-        self.hp = float(v)
-
-    @property
-    def shield_now(self) -> float:
-        return float(self.shield)
-
-    @shield_now.setter
-    def shield_now(self, v: float) -> None:
-        self.shield = float(v)
+    acted_this_turn: bool = False
 
     def is_dead(self) -> bool:
-        return float(self.hp) <= 0.0
+        return float(self.hp_now) <= 0.0
+
+    # ---- backward compat aliases ----
+    @property
+    def hp(self) -> float:
+        return float(self.hp_now)
+
+    @hp.setter
+    def hp(self, v: float) -> None:
+        self.hp_now = float(v)
+
+    @property
+    def has_acted_this_turn(self) -> bool:
+        return bool(self.acted_this_turn)
+
+    @has_acted_this_turn.setter
+    def has_acted_this_turn(self, v: bool) -> None:
+        self.acted_this_turn = bool(v)
 
 
+# =========================================================
+# Battle Result (battle_simulator 會塞 extra)
+# =========================================================
 
-from typing import Any, Dict, Optional  # 確保 models.py 有 Any/Dict/Optional
-
-@dataclass(init=False)
+@dataclass
 class BattleResult:
-    """
-    戰鬥結果
-
-    battle_simulator 可能會塞入額外欄位（例如 extra），
-    這裡做成 forward-compatible，避免每次改 simulator 就爆。
-    """
     battle_index: int
     winner: str
     turns: int
     player_hp_end: float
     enemies_alive: int
-    extra: Optional[Dict[str, Any]]
-
-    def __init__(
-        self,
-        battle_index: int,
-        winner: str,
-        turns: int,
-        player_hp_end: float,
-        enemies_alive: int,
-        extra: Optional[Dict[str, Any]] = None,
-        **_ignored: Any,
-    ) -> None:
-        self.battle_index = int(battle_index)
-        self.winner = str(winner)
-        self.turns = int(turns)
-        self.player_hp_end = float(player_hp_end)
-        self.enemies_alive = int(enemies_alive)
-        self.extra = extra
-
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 # =========================================================
-# Utility
+# Utility: simple enum parsing helper
 # =========================================================
 
 def parse_enum(enum_cls: Enum, value: str, default):
