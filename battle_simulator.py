@@ -27,7 +27,7 @@ from battle_reporter import BattleReporter
 @dataclass(frozen=True)
 class BattleConfig:
     battle_count: int = 1
-    seed: int = 123
+    seed: int = 123  # 方案A會忽略 seed（保留欄位不破壞介面）
     max_turns: int = 50
 
 
@@ -117,7 +117,11 @@ class BattleSimulator:
         monster_skills: List[MonsterSkill],
         ability_extra_ctx: Optional[Dict[str, Any]] = None,
     ) -> List[BattleResult]:
-        random.seed(config.seed)
+        # =========================
+        # 方案A：不做 random.seed()
+        # 讓每次執行都不會固定得到同一組結果
+        # =========================
+
         results: List[BattleResult] = []
 
         # battle_index 從 1 開始
@@ -153,9 +157,10 @@ class BattleSimulator:
         team_hp_max = float(party.team_hp_max)
         team_hp_now = float(party.team_hp_now)
 
-        # enemy_count：每場隨機 1~3（符合「依敵人數量拿點數」的測試需求）
+        # enemy_count：每場隨機 1~3
         enemy_count = random.randint(1, min(3, max(1, len(monster_indexes))))
 
+        # weighted pool by monster_weight
         pool: List[str] = []
         for m in monster_indexes:
             pool += [m.monster_id] * max(1, int(m.monster_weight))
@@ -182,7 +187,7 @@ class BattleSimulator:
         # ---------- BattleStart ----------
         extra_ctx.setdefault("enemy_count", enemy_count)
 
-        # 你要的版本：依敵人數量，最多 3 點（開戰一次）
+        # 亞玟：依敵人數量，最多 3 點（開戰一次）
         extra_ctx["arwen_points"] = min(3, int(enemy_count))
 
         self._event(
@@ -323,7 +328,7 @@ class BattleSimulator:
                     extra_ctx["arwen_points"] = before_points - 1
                     inc_mul = 0.9
 
-                # 重點：每次都印，讓 battle_reporter 可以抓到 points/mul
+                # 每次都印，便於 Excel/Reporter 抓行為
                 self._event(
                     battle_index,
                     turn,
@@ -341,6 +346,7 @@ class BattleSimulator:
                     f"{e.monster_id} attack {damage:.2f} * {inc_mul:.2f} => team_hp={team_hp_now:.2f}/{team_hp_max:.2f}",
                 )
 
+                # reset per hit
                 runtime_mod["incoming_damage_multiplier"] = 1.0
 
                 if team_hp_now <= 0:

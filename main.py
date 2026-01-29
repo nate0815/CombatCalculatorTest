@@ -303,6 +303,12 @@ def main() -> int:
     print(f"✅ Done.\nReport: {out}")
     return 0
 
+    print(
+    f"[PartnerBonus] char={cid} char_class={char_class} partner={pid} partner_class={pclass} "
+    f"match={is_match} sheet_flag={is_partner_bonus_applied} applied={applied}"
+    )
+
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
