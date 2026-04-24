@@ -404,6 +404,12 @@ AbilitySystem.on_trigger(
 
 ---
 
+## Claude Code Skills
+
+本專案提供 `/run-sim`、`/check-data`、`/add-ability`、`/battle-report` 四個 slash command，詳見 [SKILLS.md](SKILLS.md)。
+
+---
+
 ## 備註
 
 本專案目前為實驗與原型用途，架構設計以可讀性與擴充性為優先。後續可逐步演進為完整戰鬥核心系統。
