@@ -17,17 +17,19 @@ class ApplyPhase(str, Enum):
     - PRE_BATTLE: applied once when building/initializing battle context.
     - RUNTIME: applied during battle by triggers (e.g., BattleStart, OnEnemyAttack).
     """
+    # ❌ PRE_BATTLE 已定義，但 AbilitySystem.on_trigger() 執行時完全不檢查 apply_phase，
+    #    因此填 PRE_BATTLE 不會有任何效果，直到實作專用的初始化流程為止。
     PRE_BATTLE = "PRE_BATTLE"
-    RUNTIME = "RUNTIME"
+    RUNTIME = "RUNTIME"  # ✅ 目前唯一有效的值
 
 
 class SourceType(str, Enum):
     """Where the ability comes from."""
-    Partner = "Partner"
-    Character = "Character"
-    Equipment = "Equipment"
-    Card = "Card"
-    Monster = "Monster"
+    Partner = "Partner"       # ✅ 完整實作：透過 PartnerAbility 表綁定並執行
+    Character = "Character"   # ❌ 已定義，AbilitySystem 執行時被忽略
+    Equipment = "Equipment"   # ❌ 已定義，AbilitySystem 執行時被忽略
+    Card = "Card"             # ❌ 已定義，AbilitySystem 執行時被忽略
+    Monster = "Monster"       # ❌ 已定義，AbilitySystem 執行時被忽略
 
 
 class TargetScope(str, Enum):
@@ -67,8 +69,8 @@ class ConditionType(str, Enum):
 
 
 class ExecMode(str, Enum):
-    Sequential = "Sequential"
-    Parallel = "Parallel"  # reserved / future
+    Sequential = "Sequential"  # ✅ 完整實作
+    Parallel = "Parallel"      # ❌ 尚未實作，填此值與 Sequential 行為相同
 
 
 class AbilityEffectType(str, Enum):
@@ -99,8 +101,9 @@ class ValueRefType(str, Enum):
 
 
 class StatusType(str, Enum):
-    # MVP
-    AttackUp = "AttackUp"
+    # 只有 AttackUp 有機械效果（影響 player_damage_multiplier）
+    # 新增其他狀態需同時在 ability_system.py 的 _exec_effect_row() 加入對應邏輯
+    AttackUp = "AttackUp"  # ✅ 完整實作
 
 
 class StatusParamKey(str, Enum):

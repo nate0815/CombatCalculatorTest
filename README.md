@@ -92,6 +92,62 @@ Phase 2（動態，每場 Battle）
        敗北判定
 ```
 
+### Counter 機制逐步說明
+
+每個怪物技能有獨立的 Counter 計數器，從 `CounterMax` 倒數至 0：
+
+```
+【初始化】
+  counter_now = CounterMax（如 3）
+  ready = False
+
+【玩家每次出牌時】
+  foreach 技能（CounterMode=Enabled, CounterStartTrigger=OnPlayerPlayCard）:
+    counter_now -= 1
+    if counter_now <= 0: ready = True   ← 標記就緒，本回合不執行
+
+【玩家回合結束，進入敵方回合】
+  foreach 怪物的 ready 技能:
+    if EnemyPhaseActionRule=ActIfNotActedThisTurn AND 已行動過: 跳過
+    執行技能（Attack / AddShield）
+    enemy.acted_this_turn = True
+    if ReloadTiming=AfterEnemyAttackPhase:
+      ready = False
+      counter_now = CounterMax   ← 重置，下一輪重新計數
+```
+
+**範例（CounterMax=3 的攻擊技能）：**
+
+| 回合 | 玩家出牌數 | counter_now | ready | 敵方行動 |
+|------|-----------|-------------|-------|---------|
+| T1 | 3 張 | 3→2→1→0 | ✅ | 攻擊玩家，重置為 3 |
+| T2 | 1 張 | 3→2 | ❌ | 不行動 |
+| T3 | 2 張 | 2→1→0 | ✅ | 攻擊玩家，重置為 3 |
+
+> **注意**：Counter 歸零後技能在**敵方回合**才執行，不會在玩家出牌當下觸發。
+
+---
+
+## 卡牌選取機制
+
+> ⚠️ **目前為簡化版本：無牌組 / 手牌系統。**
+
+每回合，程式從全隊所有卡牌中以**隨機等機率**抽取一張出牌：
+
+```python
+card = random.choice(party_cards)  # party_cards = 全隊卡牌列表
+```
+
+以下系統**尚未實作**：
+
+| 功能 | 狀態 |
+|------|------|
+| 牌組（Deck）管理 | ❌ 未實作 |
+| 手牌（Hand）管理 | ❌ 未實作 |
+| AP 費用限制 | ❌ `ApCost` 欄位已讀取但不影響選牌 |
+| 卡牌覺醒效果差異 | ❌ `EpiphanyTier` 已讀取但不影響選牌 |
+| 指定牌組（CombatInputPanel.CardList[]） | ❌ 欄位預留但未接入 |
+
 ---
 
 ## Log Level 系統
@@ -156,20 +212,36 @@ AbilityDef
 
 ### 目前支援的 ConditionType
 
-| 類型 | 說明 |
-|------|------|
-| `OwnerClassEqualsPartnerClass` | 角色職業 == 夥伴職業 |
+| 類型 | 說明 | 狀態 |
+|------|------|------|
+| `OwnerClassEqualsPartnerClass` | 角色職業 == 夥伴職業 | ✅ 已實作 |
+
+> 新增 ConditionType 的方式見下方「擴充指南」。
 
 ### 目前支援的 EffectType
 
-| 類型 | 說明 |
-|------|------|
-| `AddStatus` | 新增狀態（含持續回合數） |
-| `SetStatusParam` | 設定狀態參數（如 AttackUp 的加成數值） |
-| `SetExtraValue` | 寫入 extra_ctx 的持久化數值 |
-| `AddExtraValue` | 累加 extra_ctx 的持久化數值 |
-| `SetRuntimeMod` | 寫入 runtime_mod（影響當次觸發的傷害/治癒倍率） |
-| `ConsumeExtraPointAndSetIncomingDamageMul` | 消耗點數並設定承傷倍率（Arwen 專用） |
+| 類型 | 說明 | 狀態 |
+|------|------|------|
+| `AddStatus` | 新增狀態（含持續回合數） | ✅ 已實作 |
+| `SetStatusParam` | 設定狀態參數（如 AttackUp 的加成數值） | ✅ 已實作 |
+| `SetExtraValue` | 寫入 extra_ctx 的持久化數值 | ✅ 已實作 |
+| `AddExtraValue` | 累加 extra_ctx 的持久化數值 | ✅ 已實作 |
+| `SetRuntimeMod` | 寫入 runtime_mod（影響當次觸發的傷害/治癒倍率） | ✅ 已實作 |
+| `ConsumeExtraPointAndSetIncomingDamageMul` | 消耗點數並設定承傷倍率（Arwen 專用） | ✅ 已實作 |
+
+### 目前支援的 StatusType
+
+| 狀態 | 說明 | 狀態 |
+|------|------|------|
+| `AttackUp` | 增加本回合輸出傷害倍率（透過 `player_damage_multiplier`） | ✅ 已實作 |
+| DefenseUp / 其他 | — | ❌ 尚未定義，新增須同時擴充 `StatusType` enum 與 `get_damage_multiplier()` 邏輯 |
+
+### apply_phase 說明
+
+| 值 | 說明 | 狀態 |
+|---|------|------|
+| `RUNTIME` | 戰鬥中由 TriggerEvent 觸發（目前唯一運作路徑） | ✅ 已實作 |
+| `PRE_BATTLE` | 戰鬥初始化時套用一次 | ❌ 已定義於資料模型，**但 AbilitySystem 執行時未檢查此欄位** |
 
 ### 數值來源（Value Resolution）
 
@@ -182,10 +254,21 @@ Effect 的數值可以來自：
 ## Ability 執行引擎（ability_system.py）
 
 ```python
-AbilitySystem.trigger(
+AbilitySystem.on_trigger(
     trigger_event,    # TriggerEvent enum
-    extra_ctx,        # Dict，持久化戰鬥狀態（跨回合）
-    runtime_mod,      # Dict，當次觸發的倍率（每次觸發重置）
+    ctx={             # 每次觸發的 runtime context
+        "partner_id": ...,
+        "partner_stack_count": ...,
+        "owner_class": ...,
+        "partner_class": ...,
+        "runtime_mod": {},    # 傷害/治癒倍率，每次觸發後重置
+    },
+    ability_context={ # 整場戰鬥持久的 context
+        "extra_ctx": {},              # 跨回合持久狀態
+        "statuses": [],               # 狀態清單
+        "partner_abilities": {},      # partner_id → [ability_id]
+        "partner_stack_curves": {},   # partner_id → StatTypeId → [float]
+    },
 )
 ```
 
@@ -195,7 +278,7 @@ AbilitySystem.trigger(
 3. 評估 Condition Group（AND/OR）
 4. 執行 Effect Group，修改 `extra_ctx` 或 `runtime_mod`
 
-> **目前限制**：只有 `source_type = Partner` 的 Ability 有完整執行路徑。Character / Equipment / Card / Monster 的 source type 已定義但尚未實作。
+> ⚠️ **目前限制**：只有 `source_type = Partner` 的 Ability 有完整執行路徑。Character / Equipment / Card / Monster 的 source_type 已定義於 `ability_models.py`，但 AbilitySystem 執行時完全忽略，不會觸發。
 
 ---
 
@@ -211,6 +294,62 @@ AbilitySystem.trigger(
 - **Effect**：
   - 開戰時依敵人數量初始化防護點數（最多 3 點）
   - 每次受到攻擊消耗 1 點，承傷倍率降為 0.9
+
+---
+
+## 實作狀態總覽
+
+> 下表記錄各功能的完成狀態，供開發者快速掌握哪些已可用、哪些仍需補完。
+
+### 核心戰鬥系統
+
+| 功能 | 狀態 | 說明 |
+|------|------|------|
+| Phase 1 靜態數值計算 | ✅ 完整 | 角色等級插值、夥伴基礎加成 |
+| Phase 2 戰鬥迴圈 | ✅ 完整 | 回合制，含玩家/敵方階段 |
+| 卡牌出牌（隨機選取） | ✅ 運作中 | 僅 `random.choice`，無牌組/手牌管理 |
+| 怪物 Counter 機制 | ✅ 完整 | 倒數計時、就緒、執行、重置 |
+| 怪物技能：Attack | ✅ 完整 | — |
+| 怪物技能：AddShield | ✅ 完整 | — |
+| 怪物技能：Buff / Debuff | ❌ 未實作 | `MonsterSkillType` 已定義，無執行邏輯 |
+| 玩家卡牌：Damage | ✅ 完整 | — |
+| 玩家卡牌：Heal | ✅ 完整 | — |
+| 玩家卡牌：Shield | ⚠️ 部分 | 數值計算存在，護盾吸收傷害邏輯未驗證 |
+| 玩家卡牌：Buff / Debuff | ❌ 未實作 | `EffectType` 已定義，無執行邏輯 |
+| AP 費用系統 | ❌ 未實作 | `ApCost` 欄位已讀取但不影響出牌 |
+| 牌組 / 手牌管理 | ❌ 未實作 | 目前為全隊卡牌隨機選取 |
+
+### Ability 系統
+
+| 功能 | 狀態 | 說明 |
+|------|------|------|
+| Partner Ability（全流程） | ✅ 完整 | 資料驅動，無需改程式即可新增 |
+| Character Ability | ❌ 未實作 | `SourceType.Character` 已定義，執行時被忽略 |
+| Equipment Ability | ❌ 未實作 | `SourceType.Equipment` 已定義，執行時被忽略 |
+| Card Ability | ❌ 未實作 | `SourceType.Card` 已定義，執行時被忽略 |
+| Monster Ability | ❌ 未實作 | `SourceType.Monster` 已定義，執行時被忽略 |
+| apply_phase: RUNTIME | ✅ 完整 | 所有 Partner Ability 的觸發路徑 |
+| apply_phase: PRE_BATTLE | ❌ 未實作 | 已定義於資料模型，AbilitySystem 不檢查此欄位 |
+| TriggerEvent: BattleStart | ✅ 完整 | — |
+| TriggerEvent: FirstTurnStart | ✅ 完整 | — |
+| TriggerEvent: TurnStart / TurnEnd | ✅ 完整 | — |
+| TriggerEvent: OnPlayCard | ✅ 完整 | — |
+| TriggerEvent: OnEnemyAttack | ✅ 完整 | — |
+| ConditionType: OwnerClassEqualsPartnerClass | ✅ 完整 | — |
+| 其他 ConditionType | ❌ 未實作 | 新增需修改程式 |
+| StatusType: AttackUp | ✅ 完整 | 影響 `player_damage_multiplier` |
+| StatusType: DefenseUp / 其他 | ❌ 未實作 | 尚未定義，需同時擴充 enum 與計算邏輯 |
+
+### 輸入資料
+
+| 欄位 / 功能 | 狀態 | 說明 |
+|------------|------|------|
+| CharacterId / Level | ✅ 使用中 | — |
+| PartnerId / PartnerLevel / PartnerStackCount | ✅ 使用中 | — |
+| IsPartnerBonusApplied | ⚠️ 部分 | 讀取後傳入 context，但 Phase 1 計算**固定套用**夥伴加成，此旗標未實際控制計算行為 |
+| AffectionLevel | ❌ 未使用 | 欄位讀取並儲存，但不影響任何計算（`Affection.xlsx` 也尚未接入） |
+| FragmentIdList / EquipmentIdList / CardList 等 | ❌ 未啟用 | 欄位預留，不影響模擬 |
+| MonsterRank | ❌ 未使用 | 欄位讀取並儲存，不影響怪物選取或戰鬥邏輯 |
 
 ---
 

@@ -242,6 +242,10 @@ class CombatStaticCalculator:
         level: float,
         partner_id: Optional[str],
         partner_level: float,
+        # ❌ 以下參數尚未接入計算：
+        #   - affection_level: AffectionLevel 讀取並儲存，但 Affection.xlsx 尚未接入
+        #   - is_partner_bonus_applied: CombatInputPanel 的旗標讀取後未控制此處，目前固定套用夥伴加成
+        #   - partner_stack_count: PartnerStack 加成由 Ability 系統處理，Phase 1 不套用
     ) -> CharacterSnapshot:
         base = self.char_base.get(character_id, level)
         atk, defense, hp = base.atk, base.defense, base.hp

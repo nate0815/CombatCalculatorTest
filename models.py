@@ -34,11 +34,11 @@ class EffectType(str, Enum):
     """
     卡牌效果類型
     """
-    Damage = "Damage"
-    Shield = "Shield"
-    Heal = "Heal"
-    Buff = "Buff"
-    Debuff = "Debuff"
+    Damage = "Damage"   # ✅ 完整實作
+    Heal = "Heal"       # ✅ 完整實作
+    Shield = "Shield"   # ⚠️ 數值計算存在，護盾吸收傷害邏輯尚未驗證完整
+    Buff = "Buff"       # ❌ 尚未實作執行邏輯
+    Debuff = "Debuff"   # ❌ 尚未實作執行邏輯
 
 
 class ScaleStat(str, Enum):
@@ -71,10 +71,10 @@ class OnEndTurnAction(str, Enum):
 # ---- Monster skill system (MVP) ----
 
 class MonsterSkillType(str, Enum):
-    Attack = "Attack"
-    AddShield = "AddShield"
-    Buff = "Buff"
-    Debuff = "Debuff"
+    Attack = "Attack"       # ✅ 完整實作
+    AddShield = "AddShield" # ✅ 完整實作
+    Buff = "Buff"           # ❌ 尚未實作執行邏輯
+    Debuff = "Debuff"       # ❌ 尚未實作執行邏輯
 
 
 class ReloadTiming(str, Enum):
@@ -136,7 +136,9 @@ class AbilityEffectType(str, Enum):
 
 
 class StatusType(str, Enum):
-    AttackUp = "AttackUp"
+    # 只有 AttackUp 有機械效果（影響 player_damage_multiplier）
+    # 新增其他狀態需同時擴充 PartyRuntimeState.get_damage_multiplier()
+    AttackUp = "AttackUp"  # ✅ 完整實作
 
 
 class StatusParamKey(str, Enum):
@@ -289,8 +291,8 @@ class Card:
     card_id: str
     character_id: str
     group_id: str
-    epiphany_tier: int = 0
-    ap_cost: int = 1
+    epiphany_tier: int = 0  # ❌ 讀取並儲存，目前不影響出牌選取或效果
+    ap_cost: int = 1        # ❌ 讀取並儲存，AP 費用系統尚未實作
 
 
 @dataclass
@@ -320,7 +322,7 @@ class CardEffect:
 @dataclass
 class MonsterIndex:
     monster_id: str
-    monster_rank: str
+    monster_rank: str   # ❌ 讀取並儲存，目前不影響怪物選取或戰鬥邏輯
     monster_weight: int = 1
 
 

@@ -37,7 +37,7 @@
 | `PartnerLevel` | 整數 | ✅ | 夥伴等級 |
 | `PartnerStackCount` | 整數 | ✅ | 夥伴好感度堆疊層數，對應 `PartnerStatStack` 的 Stack 欄位（0～4） |
 | `IsPartnerBonusApplied` | 0 / 1 | ✅ | 是否套用夥伴數值加成（1 = 套用，0 = 不套用） |
-| `AffectionLevel` | 整數 | ✅ | 好感度等級（對應 `Affection.xlsx`） |
+| `AffectionLevel` | 整數 | ✅ | 好感度等級（欄位讀取並儲存，但**目前不影響任何計算**；`Affection.xlsx` 尚未接入） |
 | `FragmentIdList[]` | 文字 | ⬜ | 記憶碎片 ID（尚未啟用，可留空） |
 | `FragmentLevelList[]` | 整數 | ⬜ | 記憶碎片等級（尚未啟用，可留空） |
 | `FragmentRandomStatList[]` | 文字 | ⬜ | 碎片隨機詞條類型（尚未啟用，可留空） |
@@ -148,7 +148,7 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 | `CharacterId` | 文字 | ✅ | 所屬角色 ID，需與 `Character.xlsx / CharacterIndex` 一致 |
 | `GroupId` | 文字 | ⬜ | 卡牌組別（同一組為同一張牌的不同版本，如 `Card_Yuki_01`） |
 | `EpiphanyTier` | 整數 | ⬜ | 覺醒層數（0 = 未覺醒） |
-| `ApCost` | 整數 | ✅ | 費用（目前尚未影響計算，可填 1） |
+| `ApCost` | 整數 | ✅ | 費用（欄位讀取並儲存，**目前不影響出牌選取**；AP 費用系統尚未實作，可暫填 1） |
 
 ---
 
@@ -171,13 +171,13 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 
 **EffectType 有效值：**
 
-| 值 | 說明 |
-|----|------|
-| `Damage` | 對敵人造成傷害，數值以 ScaleStat × Multiplier 計算 |
-| `Heal` | 回復玩家隊伍生命，數值同上 |
-| `Shield` | 產生護盾（暫未完整實作） |
-| `Buff` | 施加增益狀態（暫未完整實作） |
-| `Debuff` | 施加減益狀態（暫未完整實作） |
+| 值 | 說明 | 狀態 |
+|----|------|------|
+| `Damage` | 對敵人造成傷害，數值以 ScaleStat × Multiplier 計算 | ✅ 完整 |
+| `Heal` | 回復玩家隊伍生命，數值同上 | ✅ 完整 |
+| `Shield` | 產生護盾（數值計算存在，但護盾吸收傷害的邏輯尚未驗證完整） | ⚠️ 部分 |
+| `Buff` | 施加增益狀態 | ❌ 未實作（`EffectType` 已定義，無執行邏輯） |
+| `Debuff` | 施加減益狀態 | ❌ 未實作（`EffectType` 已定義，無執行邏輯） |
 
 ---
 
@@ -192,7 +192,7 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 | 欄位 | 型態 | 必填 | 說明 |
 |------|------|------|------|
 | `MonsterId` | 文字 | ✅ | 怪物唯一 ID（如 `Monster01`） |
-| `MonsterRank` | 文字 | ⬜ | 怪物等級別（如 `Normal`、`Elite`、`Boss`，暫未影響計算） |
+| `MonsterRank` | 文字 | ⬜ | 怪物等級別（如 `Normal`、`Elite`、`Boss`，欄位讀取並儲存，**目前不影響怪物選取或戰鬥邏輯**） |
 | `MonsterWeight` | 整數 | ✅ | 隨機出現權重，數字越大越容易被選到（最小填 1） |
 
 ---
@@ -230,15 +230,40 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 
 **SkillType 有效值：**
 
-| 值 | 說明 |
-|----|------|
-| `Attack` | 攻擊玩家，傷害 = `Value`（或 fallback `MonsterBaseStat.Attack`） |
-| `AddShield` | 對自身增加護盾，護盾量 = `Value` |
+| 值 | 說明 | 狀態 |
+|----|------|------|
+| `Attack` | 攻擊玩家，傷害 = `Value`（或 fallback `MonsterBaseStat.Attack`） | ✅ 完整 |
+| `AddShield` | 對自身增加護盾，護盾量 = `Value` | ✅ 完整 |
+| `Buff` | 施加增益 | ❌ 未實作（`MonsterSkillType` 已定義，無執行邏輯） |
+| `Debuff` | 施加減益 | ❌ 未實作（`MonsterSkillType` 已定義，無執行邏輯） |
 
-> **Counter 運作說明**：
-> - 怪物技能採用倒數計時機制，初始值為 `CounterMax`，每次玩家出牌 -1。
-> - 當 Counter 歸零，技能標記為「Ready」，**於敵方回合**執行（不在玩家回合執行）。
-> - 執行後依 `ReloadTiming` 重置 Counter。
+> **Counter 運作說明（逐步）**：
+>
+> Counter 是**倒數計時器**，代表「玩家再出幾張牌就觸發」：
+>
+> 1. **戰鬥開始**：`counter_now = CounterMax`，`ready = False`
+> 2. **玩家每次出牌**（CounterStartTrigger=`OnPlayerPlayCard`）：
+>    - `counter_now -= 1`
+>    - 若 `counter_now <= 0`：將 `ready` 標記為 `True`（本回合不執行）
+> 3. **進入敵方回合**：檢查每個 ready 的技能
+>    - 若 `EnemyPhaseActionRule=ActIfNotActedThisTurn` 且該怪本回合已行動：跳過
+>    - 否則執行技能，`acted_this_turn = True`
+> 4. **技能執行後**（ReloadTiming=`AfterEnemyAttackPhase`）：
+>    - `ready = False`，`counter_now = CounterMax`（重置）
+>
+> **填寫範例（CounterMax=3 的攻擊技能）**：
+>
+> | 回合 | 玩家出牌數 | counter_now 變化 | 敵方行動 |
+> |------|-----------|-----------------|---------|
+> | T1 | 3 張 | 3 → 2 → 1 → 0 (ready) | 攻擊，重置 counter=3 |
+> | T2 | 1 張 | 3 → 2 | 不行動 |
+> | T3 | 2 張 | 2 → 1 → 0 (ready) | 攻擊，重置 counter=3 |
+>
+> **ReloadTiming 說明**：
+>
+> | 值 | 說明 | 狀態 |
+> |----|------|------|
+> | `AfterEnemyAttackPhase` | 技能執行後立即重置（目前唯一支援的值） | ✅ 完整 |
 
 ---
 
@@ -253,14 +278,24 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 | 欄位 | 型態 | 必填 | 說明 |
 |------|------|------|------|
 | `AbilityId` | 文字 | ✅ | Ability 唯一 ID（建議格式：`AB_{SourceType}_{PartnerId}_{描述}`，如 `AB_Partner_Douglas_StrikerBuff`） |
-| `ApplyPhase` | 文字 | ✅ | 套用階段：`RUNTIME`（戰鬥中動態觸發，目前僅支援此值） |
+| `ApplyPhase` | 文字 | ✅ | 套用階段：`RUNTIME`（戰鬥中由 TriggerEvent 觸發）或 `PRE_BATTLE`（戰鬥初始化時套用一次）。**注意：`PRE_BATTLE` 已定義於資料模型，但 AbilitySystem 執行時不檢查此欄位，目前僅 `RUNTIME` 有效。** |
 | `TriggerEvent` | 文字 | ✅ | 觸發時機，見下方有效值 |
 | `ConditionGroupId` | 文字 | ⬜ | 條件群組 ID，對應 `ConditionMenu.xlsx / ConditionGroup`。留空表示無條件觸發 |
 | `EffectGroupId` | 文字 | ✅ | 效果群組 ID，對應 `EffectMenu.xlsx / EffectGroup` |
 | `Priority` | 整數 | ✅ | 執行優先度，數字大的先執行。相同時依 AbilityId 字母順序排列。通常填 `0` |
-| `SourceType` | 文字 | ✅ | 來源類型：目前填 `Partner`（其餘類型尚未啟用） |
+| `SourceType` | 文字 | ✅ | 來源類型，見下方有效值 |
 | `Enabled` | TRUE / FALSE | ✅ | 是否啟用此 Ability |
 | `Note` | 文字 | ⬜ | 備註說明，不影響計算 |
+
+**SourceType 有效值：**
+
+| 值 | 說明 | 狀態 |
+|----|------|------|
+| `Partner` | 夥伴技能（目前唯一有完整執行路徑的來源） | ✅ 完整 |
+| `Character` | 角色技能 | ❌ 未實作（已定義，執行時被忽略） |
+| `Equipment` | 裝備技能 | ❌ 未實作（已定義，執行時被忽略） |
+| `Card` | 卡牌技能 | ❌ 未實作（已定義，執行時被忽略） |
+| `Monster` | 怪物技能（Ability 系統） | ❌ 未實作（已定義，執行時被忽略） |
 
 **TriggerEvent 有效值：**
 
@@ -316,9 +351,11 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 
 **ConditionType 有效值：**
 
-| 值 | 說明 | 需要的 Param |
-|----|------|-------------|
-| `OwnerClassEqualsPartnerClass` | 角色職業 == 夥伴職業（從 ctx 自動讀取，無需額外 Param） | 無 |
+| 值 | 說明 | 需要的 Param | 狀態 |
+|----|------|-------------|------|
+| `OwnerClassEqualsPartnerClass` | 角色職業 == 夥伴職業（從 ctx 自動讀取，無需額外 Param） | 無 | ✅ 完整 |
+
+> 新增 ConditionType 需同時修改 `ability_models.py`（ConditionType enum）與 `ability_system.py`（`_eval_condition_row()` 新增判斷邏輯）。
 
 ---
 
@@ -356,14 +393,21 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 
 **EffectType 詳細說明：**
 
-| EffectType | Value1 | Value2 | ValueRefType / ValueRefId | 說明 |
-|------------|--------|--------|--------------------------|------|
-| `AddStatus` | 狀態名稱（如 `AttackUp`） | 持續回合數 | — | 為角色施加狀態，持續 Value2 回合 |
-| `SetStatusParam` | 狀態參數名稱（如 `increase`） | 常數數值（ValueRefType 為空時使用） | `PartnerStack` + StatTypeId（從曲線取值時） | 設定狀態的參數值 |
-| `SetExtraValue` | extra_ctx 的 key 名稱 | 常數數值 | 同上 | 寫入跨回合持久狀態（新值覆蓋舊值） |
-| `AddExtraValue` | extra_ctx 的 key 名稱 | 常數數值 | 同上 | 累加到跨回合持久狀態 |
-| `SetRuntimeMod` | runtime_mod 的 key 名稱（如 `player_damage_multiplier`） | 常數數值 | 同上 | 設定本次觸發的傷害/治癒倍率 |
-| `ConsumeExtraPointAndSetIncomingDamageMul` | 點數 key 名稱（如 `arwen_points`） | 承傷倍率（如 `0.9`） | — | 消耗 1 點，並將承傷倍率設為 Value2。點數耗盡後效果停止 |
+| EffectType | Value1 | Value2 | ValueRefType / ValueRefId | 說明 | 狀態 |
+|------------|--------|--------|--------------------------|------|------|
+| `AddStatus` | 狀態名稱（如 `AttackUp`） | 持續回合數 | — | 為角色施加狀態，持續 Value2 回合 | ✅ |
+| `SetStatusParam` | 狀態參數名稱（如 `increase`） | 常數數值 | `PartnerStack` + StatTypeId | 設定狀態的參數值 | ✅ |
+| `SetExtraValue` | extra_ctx 的 key 名稱 | 常數數值 | 同上 | 寫入跨回合持久狀態（新值覆蓋舊值） | ✅ |
+| `AddExtraValue` | extra_ctx 的 key 名稱 | 常數數值 | 同上 | 累加到跨回合持久狀態 | ✅ |
+| `SetRuntimeMod` | runtime_mod 的 key 名稱（如 `player_damage_multiplier`） | 常數數值 | 同上 | 設定本次觸發的傷害/治癒倍率 | ✅ |
+| `ConsumeExtraPointAndSetIncomingDamageMul` | 點數 key 名稱（如 `arwen_points`） | 承傷倍率（如 `0.9`） | — | 消耗 1 點，並將承傷倍率設為 Value2。點數耗盡後效果停止 | ✅ |
+
+**AddStatus 可用的狀態名稱（StatusType）：**
+
+| 狀態名稱 | 說明 | 狀態 |
+|---------|------|------|
+| `AttackUp` | 增加玩家傷害倍率（透過 `player_damage_multiplier`） | ✅ 完整 |
+| `DefenseUp` 等其他狀態 | — | ❌ 未實作（需擴充 `ability_models.py` 的 `StatusType` enum 與計算邏輯）|
 
 **runtime_mod 可用的 key：**
 
@@ -386,6 +430,38 @@ Yuki        | 10    | Partner001 | 50           | 4                 | 1         
 | `MemoryFragment.xlsx` | 記憶碎片資料與隨機詞條規則 |
 | `Potential.xlsx` | 潛能樹節點與效果 |
 | `PreBattleRule.xlsx` | 戰鬥前規則（如先手條件等） |
+
+---
+
+## 附錄：欄位實作狀態速查
+
+> 供填表人員快速確認哪些欄位真正影響計算結果。✅ 影響計算 ⚠️ 部分 ❌ 不影響計算（填或不填結果一樣）
+
+| 檔案 | 欄位 | 影響計算 | 備註 |
+|------|------|---------|------|
+| CombatInputPanel | CharacterId / Level | ✅ | — |
+| CombatInputPanel | PartnerId / PartnerLevel / PartnerStackCount | ✅ | — |
+| CombatInputPanel | IsPartnerBonusApplied | ⚠️ | 讀取但 Phase 1 固定套用加成，旗標未實際控制 |
+| CombatInputPanel | AffectionLevel | ❌ | 讀取並儲存，Affection.xlsx 尚未接入 |
+| CombatInputPanel | FragmentIdList / EquipmentIdList / CardList 等 | ❌ | 欄位預留，不影響模擬 |
+| Character | CharacterId / Class / IsPlayable | ✅ | — |
+| Character | CharacterBaseStatByLevel（Attack/Defense/Health） | ✅ | 支援線性插值 |
+| Character | NameKey / Rarity / AttributeType / DefaultDeckId / PotentialTreeId | ❌ | 暫未使用 |
+| Partner | PartnerLevelStat（Attack/Defense/Health） | ✅ | 支援線性插值 |
+| Partner | PartnerStatStack（Stack0Value～Stack4Value） | ✅ | 用於 PartnerStack ValueRefType |
+| Card | CardId / CharacterId / EffectType / ScaleStat / Multiplier | ✅ | — |
+| Card | ApCost / EpiphanyTier / GroupId | ❌ | 讀取並儲存，不影響出牌 |
+| Card | Shield / Buff / Debuff EffectType | ⚠️ / ❌ | Shield 部分、Buff/Debuff 未實作 |
+| Monster | MonsterId / MonsterWeight | ✅ | Weight 影響怪物隨機選取 |
+| Monster | MonsterRank | ❌ | 讀取並儲存，不影響戰鬥 |
+| Monster | MonsterBaseStat（Attack/Health） | ✅ | Attack 作為傷害 fallback |
+| Monster | MonsterBaseStat（Defense） | ❌ | 讀取但防禦計算尚未實作 |
+| Monster | MonsterSkill（Attack/AddShield + Counter 欄位） | ✅ | — |
+| Monster | MonsterSkill（Buff/Debuff SkillType） | ❌ | 已定義，無執行邏輯 |
+| AbilityMenu | SourceType=Partner 的 Ability | ✅ | — |
+| AbilityMenu | SourceType=Character/Equipment/Card/Monster | ❌ | 已定義，執行時被忽略 |
+| AbilityMenu | ApplyPhase=RUNTIME | ✅ | — |
+| AbilityMenu | ApplyPhase=PRE_BATTLE | ❌ | 已定義，未被檢查執行 |
 
 ---
 

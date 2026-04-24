@@ -527,6 +527,7 @@ class BattleSimulator:
             if not party_cards:
                 self._event(battle_index, turn, "Player", "NoCard", "No card to play.")
             else:
+                # ❌ 卡牌選取目前為純隨機，無牌組/手牌/AP 費用管理
                 card = random.choice(party_cards)
                 effects = effects_by_card_id.get(card.card_id, [])
 

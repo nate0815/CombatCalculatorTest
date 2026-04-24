@@ -109,6 +109,10 @@ class AbilitySystem:
         IMPORTANT:
         - We only execute Partner-bound abilities of the currently equipped partner_id.
         - This makes the system truly "table-driven": PartnerAbility decides what runs.
+        - ❌ 未實作：Character / Equipment / Card / Monster source_type 的 Ability
+          在此完全不會被迭代到，即使 Excel 有填資料也不會觸發。
+          需要額外建立各 source_type 的索引結構（如 character_abilities dict）並在此加入對應查找分支。
+        - ❌ 未實作：apply_phase 未被檢查，PRE_BATTLE 與 RUNTIME 的 Ability 行為完全相同。
         """
         partner_id = ctx.get("partner_id") or ability_context.get("partner_id")
         if not partner_id:
