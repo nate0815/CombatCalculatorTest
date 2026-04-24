@@ -23,6 +23,8 @@ from ability_models import TriggerEvent
 from ability_system import AbilitySystem
 from battle_reporter import BattleReporter
 
+_LEVEL_ORDER = {LogLevel.INFO: 0, LogLevel.DEBUG: 1, LogLevel.TRACE: 2}
+
 
 @dataclass(frozen=True)
 class BattleConfig:
@@ -50,8 +52,13 @@ class BattleSimulator:
         actor: str,
         event_type: str,
         message: str,
+        *,
+        level: LogLevel = LogLevel.INFO,
         **extra: Any,
     ) -> None:
+        if _LEVEL_ORDER.get(self.log_level, 0) < _LEVEL_ORDER.get(level, 0):
+            return
+
         if self.reporter:
             payload = {
                 "battle_index": battle_index,
@@ -86,6 +93,8 @@ class BattleSimulator:
             "Ability",
             "BeforeTrigger",
             f"[Ability] Before trigger: player_damage_multiplier={dmg_mul} healing_multiplier={heal_mul}",
+            player_damage_multiplier=dmg_mul,
+            healing_multiplier=heal_mul,
         )
 
         self.ability_system.trigger(
@@ -102,6 +111,8 @@ class BattleSimulator:
             "Ability",
             "AfterTrigger",
             f"[Ability] After trigger: player_damage_multiplier={dmg_mul2} healing_multiplier={heal_mul2} (triggered by {source_desc})",
+            player_damage_multiplier=dmg_mul2,
+            healing_multiplier=heal_mul2,
             extra_ctx_keys=list(extra_ctx.keys()),
         )
 
@@ -245,6 +256,7 @@ class BattleSimulator:
                     "EnemyCounter",
                     "Tick",
                     f"{e.monster_id} skill={getattr(sk, 'skill_type', 'Unknown')} counter {cnow}/{cmax}",
+                    level=LogLevel.TRACE,
                 )
 
                 if cnow <= 0:
@@ -329,8 +341,10 @@ class BattleSimulator:
                 battle_index,
                 turn,
                 "Arwen",
-                "OnEnemyAttack",
+                "AfterAttack",
                 f"[Arwen] After OnEnemyAttack: points={extra_ctx.get('arwen_points', 0)} (mul={inc_mul})",
+                arwen_points=extra_ctx.get("arwen_points", 0),
+                incoming_damage_multiplier=inc_mul,
             )
 
             team_hp_now -= damage * inc_mul
@@ -489,6 +503,7 @@ class BattleSimulator:
             "Arwen",
             "Init",
             f"[Arwen] Init points={extra_ctx['arwen_points']}",
+            arwen_points=extra_ctx["arwen_points"],
         )
 
         self._trigger_ability(
@@ -547,13 +562,15 @@ class BattleSimulator:
 
                     if eff.effect_type == EffectType.Damage:
                         dmg_mul = float(runtime_mod.get("player_damage_multiplier", 1.0))
-                        self._event(
-                            battle_index,
-                            turn,
-                            "Ability",
-                            "Apply",
-                            f"[Ability] Apply player_damage_multiplier={dmg_mul} to damage value",
-                        )
+                        if dmg_mul != 1.0:
+                            self._event(
+                                battle_index,
+                                turn,
+                                "Ability",
+                                "ApplyDamageMul",
+                                f"[Ability] Apply player_damage_multiplier={dmg_mul} to damage value",
+                                player_damage_multiplier=dmg_mul,
+                            )
                         value *= dmg_mul
 
                         tgt = next((x for x in enemies if not x.is_dead()), None)
@@ -572,13 +589,15 @@ class BattleSimulator:
 
                     elif eff.effect_type == EffectType.Heal:
                         heal_mul = float(runtime_mod.get("healing_multiplier", 1.0))
-                        self._event(
-                            battle_index,
-                            turn,
-                            "Ability",
-                            "Apply",
-                            f"[Ability] Apply healing_multiplier={heal_mul} to heal value",
-                        )
+                        if heal_mul != 1.0:
+                            self._event(
+                                battle_index,
+                                turn,
+                                "Ability",
+                                "ApplyHealMul",
+                                f"[Ability] Apply healing_multiplier={heal_mul} to heal value",
+                                healing_multiplier=heal_mul,
+                            )
                         value *= heal_mul
 
                         team_hp_now = min(team_hp_max, team_hp_now + float(value))
