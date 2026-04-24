@@ -1,6 +1,6 @@
 # Claude Code Skills 使用說明
 
-本專案提供四個 Claude Code slash command，加速常見的開發與測試工作流程。
+本專案提供五個 Claude Code slash command，加速常見的開發與測試工作流程。
 
 > **前置條件**：需在 Claude Code 環境下使用（CLI、IDE 擴充套件或 claude.ai/code）。
 
@@ -12,6 +12,7 @@
 2. [/check-data](#check-data)
 3. [/add-ability](#add-ability)
 4. [/battle-report](#battle-report)
+5. [/extend-ability](#extend-ability)
 
 ---
 
@@ -174,6 +175,32 @@
 
 ---
 
+## /extend-ability
+
+**用途**：逐步引導程式人員完成 Ability 系統的程式碼擴充，涵蓋五種擴充類型。
+
+**使用時機**：
+- 需要新增目前不支援的觸發條件、技能效果、狀態類型
+- 要讓 Character / Equipment / Card / Monster 的 Ability 也能執行
+- 不確定擴充需要改哪些檔案、改哪個函式
+
+**支援的擴充類型**：
+
+| 選項 | 說明 | 涉及檔案 |
+|------|------|---------|
+| 新增 ConditionType | 新的觸發條件（如「HP 低於 50%」） | `ability_models.py`、`ability_system.py`、`ConditionMenu.xlsx` |
+| 新增 EffectType | 新的技能效果（如「固定回復 HP」） | `ability_models.py`、`ability_system.py`、`battle_simulator.py`、`EffectMenu.xlsx` |
+| 新增 StatusType | 新的持續狀態（如「DefenseUp 減傷」） | `ability_models.py`、`models.py`、`ability_system.py`、`battle_simulator.py` |
+| 新增 TriggerEvent | 新的觸發時機（如「怪物死亡時」） | `ability_models.py`、`battle_simulator.py`、`AbilityMenu.xlsx` |
+| 擴充 SourceType | 讓 Character / Equipment / Card / Monster Ability 可執行 | `ability_repository.py`、`ability_system.py`、`battle_simulator.py`、`AbilityMenu.xlsx` |
+
+**流程**：
+1. 詢問要做哪種擴充
+2. 依序說明每個需要修改的檔案、位置與程式碼範本
+3. 最後提供完成後的通用檢查清單（含 `/check-data`、`/run-sim`、`/battle-report`）
+
+---
+
 ## 推薦工作流程
 
 ```
@@ -186,7 +213,7 @@
 /battle-report ← 查看結果
 ```
 
-新增技能時：
+新增技能時（純資料，不改程式）：
 
 ```
 /add-ability  ← 取得填表清單
@@ -196,4 +223,14 @@
 /check-data   ← 驗證填寫正確
     ↓
 /run-sim + /battle-report
+```
+
+擴充技能系統時（需改程式）：
+
+```
+/extend-ability  ← 選擇擴充類型，取得逐步修改指引
+    ↓
+修改程式碼 + 填寫 Excel
+    ↓
+/check-data + /run-sim + /battle-report
 ```

@@ -406,7 +406,7 @@ AbilitySystem.on_trigger(
 
 ## Claude Code Skills
 
-本專案提供 `/run-sim`、`/check-data`、`/add-ability`、`/battle-report` 四個 slash command，詳見 [SKILLS.md](SKILLS.md)。
+本專案提供 `/run-sim`、`/check-data`、`/add-ability`、`/battle-report`、`/extend-ability` 五個 slash command，詳見 [SKILLS.md](SKILLS.md)。
 
 ---
 
