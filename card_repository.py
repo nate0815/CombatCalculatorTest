@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import pandas as pd
 
@@ -25,11 +25,14 @@ from models import (
 class CardRepository:
     """
     Load Card / CardEffect from Excel.
+
     負責從 Excel 載入卡牌與效果資料。
+
     Supports:
     - Party card pool: load_cards_for_characters(["Yuki","Cassius","Mika"])
-    - NEW: ApCost (int). Default to 1 if missing/blank.
+    - ApCost (int). Default to 1 if missing/blank.
     """
+
     data_dir: Path
     log_level: LogLevel = LogLevel.INFO
 
@@ -54,6 +57,7 @@ class CardRepository:
         """
         根據角色 ID 列表載入對應的卡牌與效果。
         Load cards filtered by character_ids, and all their effects.
+
         Returns:
             cards(list), effects_by_card(dict)
         """
@@ -105,7 +109,7 @@ class CardRepository:
             if col not in df.columns:
                 raise ValueError(f"❌ Card sheet missing column: {col}")
 
-        # NEW: ApCost is optional (default 1)
+        # ApCost is optional (default 1)
         has_ap_cost = "ApCost" in df.columns
 
         # Filter by party characters
@@ -116,6 +120,7 @@ class CardRepository:
             card_id = str(row["CardId"]).strip()
             char_id = str(row["CharacterId"]).strip()
             group_id = str(row["GroupId"]).strip()
+
             epi = int(row["EpiphanyTier"]) if not pd.isna(row["EpiphanyTier"]) else 0
 
             ap_cost = 1
@@ -142,7 +147,9 @@ class CardRepository:
         return cards
 
     def _parse_effects(
-        self, df: pd.DataFrame, allowed_card_ids: set
+        self,
+        df: pd.DataFrame,
+        allowed_card_ids: Set[str],
     ) -> Dict[str, List[CardEffect]]:
         required = [
             "CardId",
@@ -163,7 +170,6 @@ class CardRepository:
         effects_by_card: Dict[str, List[CardEffect]] = {}
 
         df2 = df[df["CardId"].astype(str).isin(allowed_card_ids)].copy()
-
         for _, row in df2.iterrows():
             card_id = str(row["CardId"]).strip()
             idx = int(row["EffectIndex"]) if not pd.isna(row["EffectIndex"]) else 0
@@ -177,7 +183,6 @@ class CardRepository:
 
             mult = row.get("Multiplier", 0.0)
             flat = row.get("FlatValue", 0.0)
-
             multiplier = float(mult) if not pd.isna(mult) else 0.0
             flat_value = float(flat) if not pd.isna(flat) else 0.0
 

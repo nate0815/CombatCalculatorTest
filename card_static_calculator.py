@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from models import (
     Card,
@@ -11,7 +11,6 @@ from models import (
     EffectType,
     PlayerPartySnapshot,
     ScaleStat,
-    TargetType,
 )
 
 
@@ -20,7 +19,6 @@ class CardEffectResult:
     """
     A lightweight, structured result of applying ONE card effect.
     單一卡牌效果的計算結果 (數值預覽)。
-    This module is kept as a reusable "card math" helper layer.
 
     Note:
     - In current MVP, battle_simulator.py applies effects directly for speed.
@@ -51,8 +49,8 @@ class CardStaticCalculator:
         effect: CardEffect,
     ) -> float:
         """
-        計算效果數值 = 基礎值(ATK/DEF/HP) * 倍率 + 固定值
-        value = base_stat(effect.scale_stat) * multiplier + flat_value
+        計算效果數值:
+            value = base_stat(effect.scale_stat) * multiplier + flat_value
 
         MVP decisions:
         - ATK/DEF use active_member final stats
@@ -79,11 +77,13 @@ class CardStaticCalculator:
     ) -> List[CardEffectResult]:
         """
         預覽卡牌的所有效果數值 (不改變戰鬥狀態)。
-        Returns a list of computed effect results for a card (no state mutation).
-        Useful for debug / UI tool / future report formatting.
+
+        Returns:
+            List[CardEffectResult]
         """
         effects = effects_by_card.get(card.card_id, [])
         out: List[CardEffectResult] = []
+
         for eff in effects:
             v = self.compute_effect_value(party, active_member, eff)
             out.append(
