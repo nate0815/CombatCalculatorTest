@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import json
-import re
 
 import pandas as pd
 
@@ -102,45 +101,6 @@ class BattleReporter:
     This reporter is tolerant: it relies on message text patterns rather than strict enums.
     """
 
-    # -------------------------
-    # Regex patterns (tolerant)
-    # -------------------------
-
-    # Example (from battle_simulator.py):
-    # [Ability] Before trigger: player_damage_multiplier=1.0 healing_multiplier=1.0
-    _re_before = re.compile(
-        r"Before trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)\s+healing_multiplier=([0-9]*\.?[0-9]+)"
-    )
-
-    # Example:
-    # [Ability] After trigger: player_damage_multiplier=1.16 healing_multiplier=1.08 (extra_ctx_keys=[...])
-    _re_after = re.compile(
-        r"After trigger:\s*player_damage_multiplier=([0-9]*\.?[0-9]+)\s+healing_multiplier=([0-9]*\.?[0-9]+)"
-    )
-
-    # Example:
-    # [Ability] Apply player_damage_multiplier=1.16 to damage value
-    _re_apply_damage = re.compile(
-        r"Apply player_damage_multiplier=([0-9]*\.?[0-9]+)\s+to damage value"
-    )
-
-    # Example:
-    # [Ability] Apply healing_multiplier=1.08 to heal value
-    _re_apply_heal = re.compile(
-        r"Apply healing_multiplier=([0-9]*\.?[0-9]+)\s+to heal value"
-    )
-
-    # Arwen init:
-    # [Arwen] Init points=3
-    _re_arwen_init = re.compile(r"\[Arwen\]\s*Init points=([0-9]+)")
-
-    # Arwen after attack:
-    # [Arwen] After OnEnemyAttack: points=2 (mul=0.9)
-    _re_arwen_after_hit = re.compile(
-        r"\[Arwen\]\s*After OnEnemyAttack:\s*points=([0-9]+)\s*\(mul=([0-9]*\.?[0-9]+)\)"
-    )
-
-    _re_triggered = re.compile(r"\btriggered by\b", re.IGNORECASE)
 
     def __init__(
         self,
@@ -242,103 +202,61 @@ class BattleReporter:
         bi_raw = payload.get("battle_index")
         if bi_raw is None:
             return
-
         try:
             battle_index = int(bi_raw)
         except Exception:
             return
-
-        msg = payload.get("message", "")
-        if msg is None:
-            return
-        msg = str(msg)
 
         met = self._ability_by_battle.get(battle_index)
         if met is None:
             met = AbilityBattleMetrics()
             self._ability_by_battle[battle_index] = met
 
-        # Ability before
-        m = self._re_before.search(msg)
-        if m:
-            try:
-                met.damage_before_multiplier = float(m.group(1))
-            except Exception:
-                pass
-            try:
-                met.heal_before_multiplier = float(m.group(2))
-            except Exception:
-                pass
-            return
+        actor = str(payload.get("actor", ""))
+        event_type = str(payload.get("event_type", ""))
 
-        # Ability after
-        m = self._re_after.search(msg)
-        if m:
-            try:
-                met.damage_after_multiplier = float(m.group(1))
-            except Exception:
-                pass
-            try:
-                met.heal_after_multiplier = float(m.group(2))
-            except Exception:
-                pass
-            return
+        if actor == "Ability":
+            if event_type == "BeforeTrigger":
+                if "player_damage_multiplier" in payload:
+                    met.damage_before_multiplier = float(payload["player_damage_multiplier"])
+                if "healing_multiplier" in payload:
+                    met.heal_before_multiplier = float(payload["healing_multiplier"])
 
-        # Apply outgoing damage multiplier
-        m = self._re_apply_damage.search(msg)
-        if m:
-            met.damage_mul_apply_count += 1
-            if met.damage_after_multiplier is None:
-                try:
-                    met.damage_after_multiplier = float(m.group(1))
-                except Exception:
-                    pass
-            return
+            elif event_type == "AfterTrigger":
+                met.ability_triggered = True
+                if met.ability_trigger_message is None:
+                    met.ability_trigger_message = str(payload.get("message", ""))[:200]
+                if "player_damage_multiplier" in payload:
+                    met.damage_after_multiplier = float(payload["player_damage_multiplier"])
+                if "healing_multiplier" in payload:
+                    met.heal_after_multiplier = float(payload["healing_multiplier"])
 
-        # Apply healing multiplier
-        m = self._re_apply_heal.search(msg)
-        if m:
-            met.heal_mul_apply_count += 1
-            if met.heal_after_multiplier is None:
-                try:
-                    met.heal_after_multiplier = float(m.group(1))
-                except Exception:
-                    pass
-            return
+            elif event_type == "ApplyDamageMul":
+                met.damage_mul_apply_count += 1
+                if met.damage_after_multiplier is None and "player_damage_multiplier" in payload:
+                    met.damage_after_multiplier = float(payload["player_damage_multiplier"])
 
-        # Arwen init points
-        m = self._re_arwen_init.search(msg)
-        if m:
-            try:
-                met.arwen_points_init = int(m.group(1))
-                met.arwen_points_last = int(m.group(1))
-            except Exception:
-                pass
-            return
+            elif event_type == "ApplyHealMul":
+                met.heal_mul_apply_count += 1
+                if met.heal_after_multiplier is None and "healing_multiplier" in payload:
+                    met.heal_after_multiplier = float(payload["healing_multiplier"])
 
-        # Arwen after hit points & mul
-        m = self._re_arwen_after_hit.search(msg)
-        if m:
-            try:
-                points_now = int(m.group(1))
-                mul = float(m.group(2))
-                met.last_incoming_mul = mul
-                met.arwen_points_last = points_now
+        elif actor == "Arwen":
+            if event_type == "Init":
+                if "arwen_points" in payload:
+                    pts = int(payload["arwen_points"])
+                    met.arwen_points_init = pts
+                    met.arwen_points_last = pts
 
-                # If mul < 1.0 → means mitigation applied (points consumed)
-                if mul < 0.9999:
-                    met.incoming_mitigation_apply_count += 1
-                    met.arwen_consume_count += 1
-            except Exception:
-                pass
-            return
-
-        # Triggered by (generic)
-        if self._re_triggered.search(msg):
-            met.ability_triggered = True
-            if met.ability_trigger_message is None:
-                met.ability_trigger_message = msg[:200]
-            return
+            elif event_type == "AfterAttack":
+                if "arwen_points" in payload:
+                    met.arwen_points_last = int(payload["arwen_points"])
+                if "incoming_damage_multiplier" in payload:
+                    mul = float(payload["incoming_damage_multiplier"])
+                    met.last_incoming_mul = mul
+                    if mul < 0.9999:
+                        met.incoming_mitigation_apply_count += 1
+                        met.arwen_consume_count += 1
 
     # =========================================================
     # Flush to Excel
@@ -503,16 +421,19 @@ class BattleReporter:
 
                 ws_sum = wb["Summary"]
                 ws_sum.freeze_panes = "A2"
-                ws_sum.auto_filter.ref = ws_sum.dimensions
+                if ws_sum.dimensions:
+                    ws_sum.auto_filter.ref = ws_sum.dimensions
 
                 ws_cfg = wb["Config"]
                 ws_cfg.freeze_panes = "A2"
-                ws_cfg.auto_filter.ref = ws_cfg.dimensions
+                if ws_cfg.dimensions:
+                    ws_cfg.auto_filter.ref = ws_cfg.dimensions
 
                 if self.enable_event_log:
                     ws_ev = wb[self.event_log_sheet_name]
                     ws_ev.freeze_panes = "A2"
-                    ws_ev.auto_filter.ref = ws_ev.dimensions
+                    if ws_ev.dimensions:
+                        ws_ev.auto_filter.ref = ws_ev.dimensions
             except Exception:
                 # Formatting is best-effort; should never break export
                 pass
